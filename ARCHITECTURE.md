@@ -162,6 +162,10 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 - Cálculos e dados monetários não usam `float32` ou `float64`.
 - Relatórios guardam os identificadores exatos das cotações no PostgreSQL e das notícias no Qdrant que sustentam a recomendação.
 - Qdrant guarda os embeddings e seus metadados estruturados; o banco relacional preserva os dados necessários à auditoria do pipeline.
+- `Money` representa unidades mínimas em `int64`, valida códigos ISO 4217 e expõe JSON com `amount` string e `currency`.
+- A migration `000001_persistence_domain` define ativos, cotações, notícias, relatórios, vínculos de auditoria e registros de idempotência; cada migration tem arquivo de subida e reversão.
+- `sqlc` gera o acesso tipado em `backend/internal/store` a partir de `backend/db/schema.sql` e `backend/db/query.sql`. O schema SQL e a migration inicial devem permanecer equivalentes.
+- O worker seleciona notícias pendentes com `FOR UPDATE SKIP LOCKED` dentro de uma transação. A execução de recomendação deve bloquear o registro de idempotência com `FOR UPDATE` e gravar relatório, vínculos de auditoria e resposta idempotente na mesma transação.
 
 ## Decisões registradas
 
@@ -175,6 +179,7 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 | Embeddings | Gemini como provedor de embeddings; o modelo específico ainda será definido. |
 | LLM e fallback | OpenRouter, priorizando o tier gratuito e com rotas de contingência para lidar com indisponibilidade, erros ou limites da rota principal. |
 | Persistência relacional | PostgreSQL 18; acesso Go gerado obrigatoriamente com `sqlc`. |
+| Domínio monetário e migrations | `Money` usa centavos inteiros exatos; migrations SQL numeradas têm arquivos `.up.sql` e `.down.sql`; o `sqlc` gera em `backend/internal/store`. |
 | Busca vetorial | Qdrant, usando o SDK oficial `qdrant-client` no Python. |
 | API HTTP | Biblioteca padrão Go `net/http`. |
 | Comunicação síncrona Go–Python | HTTP/REST com JSON; cliente Go com `net/http` e serviço Python com FastAPI. |
@@ -202,7 +207,7 @@ As escolhas abaixo ainda não estão determinadas pelos requisitos e devem ser r
 - Modelo específico de embedding do Gemini e dimensões do vetor.
 - Modelos/rotas OpenRouter principal e de contingência, sua ordem e as condições para acionar fallback.
 - Fontes concretas de cotações e respectivas regras de atualização.
-- Esquema final de tabelas, retenção de dados e estratégia de migrations.
+- Integração e versionamento das migrations oficiais do checkpointer LangGraph no ciclo de implantação PostgreSQL.
 - Tipo de fila SQS, valores de visibility timeout, política de retries e quantidade máxima de recebimentos antes da DLQ.
 - Recursos AWS simulados que serão provisionados além do SQS.
 - Formato da resposta HTTP para pedidos ainda em processamento e estratégia de consulta do estado do relatório.

@@ -1,43 +1,60 @@
 # Backend Go
 
-Este diretório contém o backend Go do monorepo. O módulo e a versão da linguagem
-estão definidos em `go.mod`; o `Dockerfile` do serviço também fica nesta pasta.
+Backend Go do monorepo, com o domínio em `internal/domain` e acesso tipado ao
+PostgreSQL gerado pelo `sqlc` em `internal/store`. O schema de entrada do `sqlc`
+fica em `db/schema.sql`; migrations versionadas e reversíveis ficam em
+`db/migrations/`.
 
-## Estrutura
+## PostgreSQL local
 
-```text
-backend/
-├── db/
-│   ├── query.sql   # queries PostgreSQL para o sqlc
-│   ├── schema.sql  # schema de entrada do sqlc
-│   └── sqlc.yml    # configuração de geração Go
-├── Dockerfile
-├── go.mod
-└── main.go
+O Compose da raiz executa PostgreSQL 18 e mantém os dados no volume
+`postgres-data`. Defina uma senha local no ambiente (não a salve no repositório)
+e suba o serviço a partir da raiz:
+
+```sh
+export POSTGRES_PASSWORD='sua-senha-local'
+docker compose up -d postgres
+docker compose ps
 ```
 
-O código da aplicação e suas funções serão organizados em `internal/`. O
-`main.go` na raiz do módulo será o ponto de entrada e chamará essas funções.
-O acesso a PostgreSQL é definido em `db/` e o código tipado será gerado pelo
-`sqlc`, conforme a configuração do projeto.
+`POSTGRES_PASSWORD` inicializa a senha apenas quando o volume é criado. Para um
+volume existente, a variável precisa corresponder à senha já configurada no
+PostgreSQL; alterá-la sozinha não troca a senha do usuário.
 
-## Comandos
+Aplique a migration inicial uma única vez:
 
-Execute os comandos a partir desta pasta:
+```sh
+docker compose exec -T postgres psql -U fin_agent -d fin_agent \
+  < backend/db/migrations/000001_persistence_domain.up.sql
+```
+
+O arquivo `.down.sql` correspondente reverte esse schema. O Compose não apaga o
+volume ao reiniciar os serviços.
+
+## Desenvolvimento e testes
+
+Execute os comandos Go a partir desta pasta:
 
 ```sh
 go test ./...
 sqlc generate -f db/sqlc.yml
 ```
 
-O esqueleto atual ainda não implementa o servidor nem as queries do banco.
-Assim, a geração do `sqlc` só terá código para produzir depois que forem
-definidos o schema e as queries.
+O teste de integração da migration requer um banco PostgreSQL 18 ou superior.
+Com o serviço local ativo, execute:
+
+```sh
+TEST_DATABASE_URL="postgres://fin_agent:${POSTGRES_PASSWORD}@localhost:5432/fin_agent?sslmode=disable" \
+  go test ./db -run TestPostgres18PersistenceMigration
+```
+
+O teste cria e remove um schema isolado; não apaga nem altera as tabelas do
+schema padrão do banco configurado.
 
 ## Docker
 
-O Dockerfile usa esta pasta como contexto de build. Quando o serviço estiver
-implementado, construa a imagem a partir da raiz do monorepo com:
+O Dockerfile usa esta pasta como contexto de build. Construa a imagem a partir
+da raiz do monorepo com:
 
 ```sh
 docker build -f backend/Dockerfile backend

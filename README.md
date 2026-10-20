@@ -65,7 +65,7 @@ uv sync --locked
 uv build
 ```
 
-O backend Go ainda está em estrutura inicial. Consulte
+O backend Go está em implementação. Consulte
 [backend/README.md](./backend/README.md) para os comandos e detalhes atuais.
 
 ## Configuração

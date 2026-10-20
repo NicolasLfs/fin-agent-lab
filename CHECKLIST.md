@@ -25,16 +25,16 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 
 ## 2. Persistência e domínio
 
-- [ ] Implementar o value object `Money` em Go com precisão decimal exata.
-- [ ] Validar o contrato JSON de `Money` e rejeitar `NaN`, notação científica e valores com mais de duas casas decimais.
-- [ ] Garantir que valores monetários não usem `float32` ou `float64` em cálculos, parsing, serialização ou persistência.
-- [ ] Definir o esquema PostgreSQL para ativos, cotações, notícias, idempotência e relatórios de recomendação.
-- [ ] Usar PostgreSQL 18 no ambiente local e nos testes de integração.
-- [ ] Criar migrations versionadas para o esquema e suas constraints e índices.
-- [ ] Configurar `sqlc` como único meio de gerar o código tipado de acesso ao PostgreSQL.
-- [ ] Escrever as queries SQL e gerar os pacotes Go com `sqlc`.
-- [ ] Manter explícitos e testáveis os limites transacionais e os locks necessários.
-- [ ] Definir os estados dos relatórios: `PROCESSING`, `COMPLETED` e `FAILED`.
+- [x] Implementar o value object `Money` em Go com precisão decimal exata.
+- [x] Validar o contrato JSON de `Money` e rejeitar `NaN`, notação científica e valores com mais de duas casas decimais.
+- [x] Garantir que valores monetários não usem `float32` ou `float64` em cálculos, parsing, serialização ou persistência.
+- [x] Definir o esquema PostgreSQL para ativos, cotações, notícias, idempotência e relatórios de recomendação.
+- [x] Usar PostgreSQL 18 no ambiente local e nos testes de integração.
+- [x] Criar migrations versionadas para o esquema e suas constraints e índices.
+- [x] Configurar `sqlc` como único meio de gerar o código tipado de acesso ao PostgreSQL.
+- [x] Escrever as queries SQL e gerar os pacotes Go com `sqlc`.
+- [x] Manter explícitos e testáveis os limites transacionais e os locks necessários.
+- [x] Definir os estados dos relatórios: `PROCESSING`, `COMPLETED` e `FAILED`.
 
 ## 3. API e serviço Go
 
