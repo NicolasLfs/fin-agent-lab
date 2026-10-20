@@ -1,0 +1,21 @@
+# Python
+/agent/.venv/
+/agent/**/__pycache__/
+/agent/.pytest_cache/
+/agent/.ruff_cache/
+/agent/build/
+/agent/dist/
+/agent/src/*.egg-info/
+
+# Go
+/backend/bin/
+/backend/coverage.out
+*.test
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Operating system
+.DS_Store
