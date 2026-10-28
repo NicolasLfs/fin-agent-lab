@@ -90,13 +90,13 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 
 ## 6. Idempotência, concorrência e resiliência
 
-- [ ] Implementar idempotência persistente para solicitações de recomendação com `Idempotency-Key`.
-- [ ] Garantir que solicitações concorrentes com a mesma chave gerem apenas um relatório.
-- [ ] Garantir que 50 ingestões concorrentes da mesma notícia gerem um único registro e um único embedding.
-- [ ] Tratar indisponibilidade temporária do PostgreSQL, Qdrant, SQS e API do LLM.
-- [ ] Testar retomada de uma execução LangGraph a partir do estado persistido no PostgreSQL após reinício ou falha do processo Python.
-- [ ] Garantir que reinícios dos containers não apaguem o estado necessário para idempotência e auditoria.
-- [ ] Verificar que falhas e retries não gerem relatórios duplicados nem percam relatórios concluídos.
+- [x] Implementar idempotência persistente para solicitações de recomendação com `Idempotency-Key`.
+- [x] Garantir que solicitações concorrentes com a mesma chave gerem apenas um relatório.
+- [x] Garantir que 50 ingestões concorrentes da mesma notícia gerem um único registro e um único embedding.
+- [x] Tratar indisponibilidade temporária do PostgreSQL, Qdrant, SQS e API do LLM.
+- [x] Testar retomada de uma execução LangGraph a partir do estado persistido no PostgreSQL após reinício ou falha do processo Python.
+- [x] Garantir que reinícios dos containers não apaguem o estado necessário para idempotência e auditoria.
+- [x] Verificar que falhas e retries não gerem relatórios duplicados nem percam relatórios concluídos.
 
 ## 7. Testes
 

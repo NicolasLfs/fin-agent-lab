@@ -313,7 +313,7 @@ JOIN LATERAL (
     ORDER BY quoted_at DESC, id
     LIMIT 1
 ) q ON true
-WHERE a.asset_type = ANY($1::asset_type[])
+WHERE a.asset_type::text = ANY($1::text[])
   AND a.asset_type <> 'FIXED_INCOME'
 ORDER BY a.ticker
 `
@@ -327,7 +327,7 @@ type ListAssetsForRecommendationRow struct {
 	Currency       string
 }
 
-func (q *Queries) ListAssetsForRecommendation(ctx context.Context, dollar_1 []AssetType) ([]ListAssetsForRecommendationRow, error) {
+func (q *Queries) ListAssetsForRecommendation(ctx context.Context, dollar_1 []string) ([]ListAssetsForRecommendationRow, error) {
 	rows, err := q.db.Query(ctx, listAssetsForRecommendation, dollar_1)
 	if err != nil {
 		return nil, err

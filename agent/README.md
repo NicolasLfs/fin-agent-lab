@@ -83,7 +83,9 @@ resposta para auditoria.
 O worker consome mensagens `news.processing` da fila SQS, valida o conteúdo,
 gera embeddings Gemini e persiste pontos via SDK oficial `qdrant-client`.
 Pontos usam UUID determinístico a partir do SHA-256 do conteúdo e ticker,
-evitando duplicação de pontos em reentregas. A mensagem só é removida da fila
+evitando duplicação de pontos em reentregas. Ingestões concorrentes do mesmo
+ponto são serializadas no processo e consultam novamente o Qdrant antes de
+gerar o embedding. A mensagem só é removida da fila
 depois da persistência; falhas são registradas com `messageId` e
 `correlationId` e ficam sujeitas a retry/DLQ.
 

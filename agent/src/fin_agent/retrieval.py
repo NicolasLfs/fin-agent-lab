@@ -2,8 +2,10 @@ import asyncio
 import hashlib
 import math
 import re
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Lock
 from typing import Any, Callable, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid5
@@ -28,6 +30,7 @@ _NEGATIVE_WORDS = {
     "prejuizo", "rebaixamento", "risco", "negativo", "downgrade", "loss",
     "negative", "recall", "warning",
 }
+_UPSERT_LOCK_STRIPES = 256
 
 
 class NewsPayload(ContractModel):
@@ -186,6 +189,7 @@ class NewsVectorStore:
         self.collection_name = collection_name
         self.vector_size = vector_size
         self.embed = embed
+        self._upsert_locks = tuple(Lock() for _ in range(_UPSERT_LOCK_STRIPES))
 
     def ensure_collection(self) -> None:
         try:
@@ -218,6 +222,24 @@ class NewsVectorStore:
             raise ToolValidationError("news contentHash does not match the normalized article content")
         tickers = event.news.resolved_tickers()
         point_ids = [str(uuid5(NAMESPACE_URL, f"{event.news.content_hash}:{ticker}")) for ticker in tickers]
+        lock_indexes = sorted(
+            {
+                int(point_id.replace("-", "")[:8], 16) % len(self._upsert_locks)
+                for point_id in point_ids
+            }
+        )
+        with ExitStack() as locks:
+            for lock_index in lock_indexes:
+                locks.enter_context(self._upsert_locks[lock_index])
+            return self._upsert_news(event, normalized_content, tickers, point_ids)
+
+    def _upsert_news(
+        self,
+        event: NewsEvent,
+        normalized_content: str,
+        tickers: list[str],
+        point_ids: list[str],
+    ) -> list[str]:
         try:
             existing = self.client.retrieve(
                 collection_name=self.collection_name,

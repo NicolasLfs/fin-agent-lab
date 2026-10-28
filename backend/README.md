@@ -57,11 +57,14 @@ configure `NEWS_PROCESSING_QUEUE_URL` ou use o valor padrão do LocalStack em
 
 O Compose da raiz executa PostgreSQL 18 e mantém os dados no volume
 `postgres-data`. Defina uma senha local no ambiente (não a salve no repositório)
-e suba o serviço a partir da raiz:
+e Suba PostgreSQL e Qdrant a partir da raiz. O Qdrant fica disponível em
+`http://localhost:6333`; ambos os serviços mantêm os dados em volumes nomeados
+para que reinícios dos containers não apaguem relatórios, chaves de idempotência
+ou embeddings:
 
 ```sh
 export POSTGRES_PASSWORD='sua-senha-local'
-docker compose up -d postgres
+docker compose up -d postgres qdrant
 docker compose ps
 ```
 

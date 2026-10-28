@@ -26,7 +26,7 @@ JOIN LATERAL (
     ORDER BY quoted_at DESC, id
     LIMIT 1
 ) q ON true
-WHERE a.asset_type = ANY($1::asset_type[])
+WHERE a.asset_type::text = ANY($1::text[])
   AND a.asset_type <> 'FIXED_INCOME'
 ORDER BY a.ticker;
 

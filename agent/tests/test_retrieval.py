@@ -1,4 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Barrier, Lock
+from time import sleep
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
@@ -195,6 +198,63 @@ def test_news_upsert_uses_stable_point_ids_and_structured_payload():
     assert point.payload["asset_ticker"] == "VALE3"
     assert point.payload["published_at"] == "2026-10-28T10:00:00+00:00"
     assert point.payload["sentiment_score"] == 0.4
+
+
+def test_concurrent_duplicate_news_generates_one_embedding_and_point():
+    workers = 50
+    start = Barrier(workers)
+    points_lock = Lock()
+
+    class FakeQdrant:
+        def __init__(self):
+            self.points = {}
+
+        def retrieve(self, collection_name, ids, with_payload=False, with_vectors=False):
+            sleep(0.05)
+            with points_lock:
+                return [self.points[point_id] for point_id in ids if point_id in self.points]
+
+        def upsert(self, collection_name, points, wait=True):
+            with points_lock:
+                for point in points:
+                    self.points[str(point.id)] = point
+
+    embeddings = []
+
+    def embed(text):
+        embeddings.append(text)
+        sleep(0.01)
+        return [0.1, 0.2, 0.3]
+
+    store = NewsVectorStore(FakeQdrant(), "news", 3, embed)
+    content = "VALE3 outlook improves."
+    event = NewsEvent.model_validate(
+        {
+            "eventType": "news.processing",
+            "correlationId": "corr-duplicates",
+            "news": {
+                "title": "Vale outlook improves",
+                "source": "wire",
+                "url": "https://example.test/news",
+                "content": content,
+                "contentHash": content_hash(content),
+                "publishedAt": "2026-10-28T10:00:00Z",
+                "assetTickers": ["VALE3"],
+            },
+        }
+    )
+
+    def process_duplicate():
+        start.wait(timeout=5)
+        return store.upsert_news(event)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(lambda _index: process_duplicate(), range(workers)))
+
+    expected_id = str(uuid5(NAMESPACE_URL, f"{content_hash(content)}:VALE3"))
+    assert results == [[expected_id]] * workers
+    assert len(embeddings) == 1
+    assert set(store.client.points) == {expected_id}
 
 
 def test_news_upsert_rejects_content_hash_that_does_not_match_normalized_text():

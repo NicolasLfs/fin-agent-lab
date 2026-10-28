@@ -95,10 +95,10 @@ func (r *Repository) Execute(
 	if err != nil {
 		return httpapi.GenerateResponse{}, databaseFailure("load recommendation report", err)
 	}
-	assetTypes := make([]store.AssetType, 0, len(request.AssetTypes))
+	assetTypes := make([]string, 0, len(request.AssetTypes))
 	agentAssetTypes := make([]string, 0, len(request.AssetTypes))
 	for _, assetType := range request.AssetTypes {
-		assetTypes = append(assetTypes, store.AssetType(assetType))
+		assetTypes = append(assetTypes, string(assetType))
 		agentAssetTypes = append(agentAssetTypes, string(assetType))
 	}
 	marketAssets, err := queries.ListAssetsForRecommendation(ctx, assetTypes)

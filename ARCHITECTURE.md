@@ -254,7 +254,10 @@ As escolhas abaixo ainda não estão determinadas pelos requisitos e devem ser r
 
 ## Execução local e infraestrutura
 
-- Docker Compose executa os serviços e dependências locais, incluindo LocalStack para simular SQS.
+- Docker Compose mantém PostgreSQL e Qdrant locais em volumes nomeados
+  (`postgres-data` e `qdrant-data`) para preservar o estado após reinícios dos
+  containers. O endpoint Qdrant local é `http://localhost:6333`.
+- LocalStack simula SQS no ambiente local.
 - Terraform em `/infra/terraform` provisiona os recursos AWS simulados pelo LocalStack, incluindo filas SQS e DLQ.
 - Kubernetes usa manifests nativos mantidos em `/infra/k8s` para API, worker e motor Python, além das dependências aplicáveis. A escolha de manifests diretos prioriza o aprendizado dos recursos básicos do Kubernetes; o ambiente é local e não será promovido entre ambientes nem para produção.
 - O cluster Kubernetes local é fornecido pelo Docker Desktop; habilite Kubernetes nas configurações do Docker Desktop e use o contexto `docker-desktop` do `kubectl`.
