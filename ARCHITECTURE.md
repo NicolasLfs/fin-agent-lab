@@ -53,6 +53,15 @@ O backend Go chama o motor Python de forma síncrona por HTTP/REST com payloads 
 
 SQS oferece entrega *at-least-once*. Portanto, consumidores devem ser idempotentes e tolerar a entrega repetida da mesma mensagem. O tempo de visibilidade, a política de retries e o limite de recebimentos devem ser configurados junto da DLQ.
 
+O produtor publica `title`, `content`, `contentHash`, `source`, `url` e
+`publishedAt`. Se não receber `assetTickers`, o agente identifica códigos B3
+explícitos no texto; se não receber `sentimentScore`, usa um léxico local
+determinístico, limitado a `[-1, 1]`, e `0` quando nenhum termo for
+reconhecido. Mensagens sem ticker são rejeitadas e permanecem na fila para
+retry/DLQ. O ID de cada ponto Qdrant é determinístico a partir do hash do
+conteúdo e do ticker; notícias associadas a tickers diferentes geram pontos
+distintos.
+
 ### Geração de ranking
 
 1. O cliente envia um pedido a `POST /recommendations/generate`, com `Idempotency-Key`.
@@ -143,6 +152,37 @@ O FastAPI deve mapear explicitamente erros de parsing do request e campos obriga
 - **Timeout total do cliente HTTP Go:** entre 30 e 45 segundos para cobrir a busca no Qdrant e a inferência do LLM sem deixar chamadas bloqueadas indefinidamente.
 - Ao atingir o timeout, cancelar a requisição usando o contexto do Go, liberar recursos e atualizar o estado do relatório para pendente ou falha recuperável conforme a política de retry. O processamento Python deve usar o `reportId` e o checkpointer LangGraph para permitir retomada idempotente.
 
+O cliente Go usa timeout total de **40 segundos**. O registro de idempotência e o
+relatório `PROCESSING` são persistidos antes da chamada Python. A execução
+bloqueia o registro de idempotência enquanto chama o agente, impedindo chamadas
+concorrentes para a mesma chave; falhas de transporte, timeout e erros
+retryable deixam o mesmo relatório pendente para retomada com a mesma chave e
+`reportId`. A gravação do relatório concluído, das referências de cotações e
+notícias, e da resposta idempotente ocorre em uma transação PostgreSQL.
+
+### Contrato público da API Go
+
+`POST /recommendations/generate` recebe `{"assetTypes":[...]}` e exige
+`Idempotency-Key`. Uma repetição concluída com a mesma chave e o mesmo payload
+reproduz a resposta original; reutilizar a chave com outro payload retorna
+`409 Conflict`. Erros são retornados no envelope padronizado. Se ainda não há
+resultado ou ocorreu falha retryable, a API retorna `503 Service Unavailable`
+com `retryable: true`; o cliente deve repetir usando a mesma chave. Não há
+endpoint de consulta de relatório nesta etapa. A liveness não consulta
+dependências; a readiness verifica PostgreSQL, `GET <QDRANT_URL>/healthz` e
+`GET <LOCALSTACK_URL>/_localstack/health`, exigindo estado SQS `available` ou
+`running`.
+
+O schema atual não armazena taxas brutas e prazos de renda fixa nem indicadores
+fundamentalistas de ações/FIIs. Assim, nesta etapa o backend encaminha preços
+de referência exatos das cotações mais recentes disponíveis para ações/FIIs,
+sem inferir rentabilidade nem usar preço isolado como métrica de ranking.
+`fixedIncomeRates` permanece vazio até existir uma fonte explícita de taxa e
+prazo; ativos sem os dados necessários não são inventados nem classificados.
+O contexto financeiro é ordenado deterministicamente por ticker e a resposta
+do agente só pode classificar ativos presentes nesse contexto, com ranks
+contíguos e IDs de notícias auditáveis.
+
 ### Orquestração do agente e estado
 
 LangGraph foi escolhido para tornar explícita e controlada a sequência das etapas do agente:
@@ -175,16 +215,18 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 | Estrutura do monorepo | `/backend` para o backend Go, `/agent` para o motor de agentes Python e `/infra` para infraestrutura, com `/infra/terraform` e `/infra/k8s`. O README da raiz apresenta o monorepo e cada serviço mantém seu README com instruções específicas. |
 | Arquivos ignorados pelo Git | Um único `.gitignore` na raiz do monorepo reúne artefatos gerados pelos serviços, arquivos locais de ambiente e arquivos do sistema operacional. |
 | Projeto Python | Python 3.11+ em `/agent`; `pyproject.toml` define metadados, dependências e configuração. Usar `uv` para gerenciamento e instalação de dependências, manter `uv.lock` versionado e usar `setuptools` como backend de build. Não usar `requirements.txt` como manifesto do projeto. |
-| Orquestração de agentes | LangGraph, com fluxo linear explícito de busca no Qdrant, análise de risco com LLM e formatação JSON/Markdown; usar checkpointer PostgreSQL para persistir o estado de execução. |
-| Embeddings | Gemini como provedor de embeddings; o modelo específico ainda será definido. |
-| LLM e fallback | OpenRouter, priorizando o tier gratuito e com rotas de contingência para lidar com indisponibilidade, erros ou limites da rota principal. |
+| Orquestração de agentes | LangGraph, com fluxo linear explícito de busca no Qdrant, análise de risco com LLM e formatação JSON/Markdown; `AsyncPostgresSaver` persiste o estado, correlacionado pelo `reportId`. |
+| Embeddings | Gemini `gemini-embedding-001`, com dimensão vetorial configurável e padrão de 768. A coleção Qdrant precisa usar a mesma dimensão. |
+| LLM e fallback | OpenRouter. `OPENROUTER_MODELS` lista em ordem a rota primária (priorizar o tier gratuito) e pelo menos uma contingência. |
 | Persistência relacional | PostgreSQL 18; acesso Go gerado obrigatoriamente com `sqlc`. |
 | Domínio monetário e migrations | `Money` usa centavos inteiros exatos; migrations SQL numeradas têm arquivos `.up.sql` e `.down.sql`; o `sqlc` gera em `backend/internal/store`. |
 | Busca vetorial | Qdrant, usando o SDK oficial `qdrant-client` no Python. |
 | API HTTP | Biblioteca padrão Go `net/http`. |
 | Comunicação síncrona Go–Python | HTTP/REST com JSON; cliente Go com `net/http` e serviço Python com FastAPI. |
 | Contrato de execução do agente | `POST /internal/agent/run`; request contém `reportId`, `deterministicContext` e `assetTypes`; response contém status, ativos ranqueados, justificativa e IDs das notícias citadas. |
-| Erros e timeouts Go–Python | Envelope JSON padronizado com `code`, `message` e `retryable`; status HTTP `400`, `422`, `429`, `502` e `503`; dial timeout de 3 s e timeout total de 30–45 s. |
+| Erros e timeouts Go–Python | Envelope JSON padronizado com `code`, `message` e `retryable`; status HTTP `400`, `422`, `429`, `502` e `503`; dial timeout de 3 s e timeout total de 40 s. |
+| Pedido ainda em processamento | Responder `503` retryable e orientar repetição com a mesma `Idempotency-Key`; retomar o mesmo `reportId`, sem endpoint de consulta nesta etapa. |
+| Readiness Go | Verificar PostgreSQL, `GET /healthz` do Qdrant e estado SQS do endpoint de saúde do LocalStack. |
 | Mensageria | Amazon SQS, simulado localmente pelo LocalStack executado via Docker. Não usar RabbitMQ. |
 | Orquestração de containers | Kubernetes local do Docker Desktop, com manifests nativos em `/infra/k8s`; não usar Helm ou Kustomize. O objetivo é aprendizado local, sem implantação em produção ou múltiplos ambientes. |
 | Infraestrutura local | Configuração Terraform em `/infra/terraform`, manifests Kubernetes em `/infra/k8s`, Docker Compose e LocalStack para execução local. O Docker Desktop fornece o cluster Kubernetes local. |
@@ -194,23 +236,21 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 
 ### Provedores de IA
 
-- **Embeddings:** Gemini será usado para gerar embeddings das notícias. A escolha do modelo e suas dimensões deve ser definida antes de configurar a coleção do Qdrant; todos os vetores persistidos na mesma coleção precisam seguir dimensões compatíveis.
+- **Embeddings:** usar `gemini-embedding-001` com 768 dimensões por padrão. `GEMINI_EMBEDDING_MODEL` e `GEMINI_EMBEDDING_DIMENSIONS` são configuráveis por ambiente; a inicialização falha explicitamente se a coleção `market-news` tiver dimensão incompatível. O consumidor grava índices de payload para `asset_ticker`, `published_at` e `sentiment_score`.
 - **LLM:** OpenRouter será usado para análise de risco e geração de justificativas, priorizando modelos acessíveis pelo tier gratuito.
-- **Rotas de contingência:** configurar alternativas no OpenRouter para falhas, indisponibilidade ou limites de uso da rota principal. A aplicação deve tratar erros e timeouts, tentar as rotas de contingência conforme uma política definida e preservar o estado da execução LangGraph.
+- **Rotas de contingência:** `OPENROUTER_MODELS` contém a rota primária e as contingências, separadas por vírgula e na ordem de tentativa. Configure a rota gratuita primeiro quando disponível. Rate limit, timeout, indisponibilidade e saída inválida acionam a próxima rota; se todas as rotas retornarem limite, responder `429`, e se falharem por outras causas, `503`.
 - **Configuração:** credenciais, identificadores de modelos e parâmetros das rotas devem ser configuráveis por ambiente, sem segredos no código.
+- **Checkpointer:** usar `AsyncPostgresSaver` e executar `setup()` na inicialização; o mesmo `reportId` é enviado como `thread_id` em toda tentativa, para recuperar o checkpoint após falhas.
 
 ## Decisões pendentes
 
 As escolhas abaixo ainda não estão determinadas pelos requisitos e devem ser registradas aqui quando forem tomadas:
 
-- Seleção do valor exato do timeout total do cliente HTTP dentro da faixa acordada de 30–45 segundos.
-- Modelo específico de embedding do Gemini e dimensões do vetor.
-- Modelos/rotas OpenRouter principal e de contingência, sua ordem e as condições para acionar fallback.
 - Fontes concretas de cotações e respectivas regras de atualização.
-- Integração e versionamento das migrations oficiais do checkpointer LangGraph no ciclo de implantação PostgreSQL.
 - Tipo de fila SQS, valores de visibility timeout, política de retries e quantidade máxima de recebimentos antes da DLQ.
 - Recursos AWS simulados que serão provisionados além do SQS.
-- Formato da resposta HTTP para pedidos ainda em processamento e estratégia de consulta do estado do relatório.
+- Fonte, escala, prazo e regra tributária necessários para calcular taxas líquidas de renda fixa.
+- Métricas fundamentais e fórmula determinística de ranking para ações e FIIs.
 
 ## Execução local e infraestrutura
 

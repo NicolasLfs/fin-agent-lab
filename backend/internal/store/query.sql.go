@@ -215,6 +215,26 @@ func (q *Queries) GetPendingMarketNews(ctx context.Context, limit int32) ([]Mark
 	return items, nil
 }
 
+const getRecommendationReport = `-- name: GetRecommendationReport :one
+SELECT id, status, ranked_assets, justification_text, created_at, updated_at
+FROM recommendation_reports
+WHERE id = $1
+`
+
+func (q *Queries) GetRecommendationReport(ctx context.Context, id pgtype.UUID) (RecommendationReport, error) {
+	row := q.db.QueryRow(ctx, getRecommendationReport, id)
+	var i RecommendationReport
+	err := row.Scan(
+		&i.ID,
+		&i.Status,
+		&i.RankedAssets,
+		&i.JustificationText,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const linkRecommendationNews = `-- name: LinkRecommendationNews :exec
 INSERT INTO recommendation_report_news (report_id, news_id, qdrant_point_id)
 VALUES ($1, $2, $3)
@@ -270,6 +290,92 @@ func (q *Queries) ListAssets(ctx context.Context) ([]Asset, error) {
 			&i.Name,
 			&i.CreatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAssetsForRecommendation = `-- name: ListAssetsForRecommendation :many
+SELECT a.id, a.ticker, a.asset_type,
+       q.id AS quote_id,
+       q.price::text AS reference_price,
+       q.currency
+FROM assets a
+JOIN LATERAL (
+    SELECT id, price, currency
+    FROM quotes
+    WHERE asset_id = a.id
+    ORDER BY quoted_at DESC, id
+    LIMIT 1
+) q ON true
+WHERE a.asset_type = ANY($1::asset_type[])
+  AND a.asset_type <> 'FIXED_INCOME'
+ORDER BY a.ticker
+`
+
+type ListAssetsForRecommendationRow struct {
+	ID             pgtype.UUID
+	Ticker         string
+	AssetType      AssetType
+	QuoteID        pgtype.UUID
+	ReferencePrice string
+	Currency       string
+}
+
+func (q *Queries) ListAssetsForRecommendation(ctx context.Context, dollar_1 []AssetType) ([]ListAssetsForRecommendationRow, error) {
+	rows, err := q.db.Query(ctx, listAssetsForRecommendation, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAssetsForRecommendationRow
+	for rows.Next() {
+		var i ListAssetsForRecommendationRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ticker,
+			&i.AssetType,
+			&i.QuoteID,
+			&i.ReferencePrice,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMarketNewsByQdrantPointIDs = `-- name: ListMarketNewsByQdrantPointIDs :many
+SELECT id, qdrant_point_id
+FROM market_news
+WHERE qdrant_point_id = ANY($1::text[])
+ORDER BY qdrant_point_id
+`
+
+type ListMarketNewsByQdrantPointIDsRow struct {
+	ID            pgtype.UUID
+	QdrantPointID pgtype.Text
+}
+
+func (q *Queries) ListMarketNewsByQdrantPointIDs(ctx context.Context, dollar_1 []string) ([]ListMarketNewsByQdrantPointIDsRow, error) {
+	rows, err := q.db.Query(ctx, listMarketNewsByQdrantPointIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMarketNewsByQdrantPointIDsRow
+	for rows.Next() {
+		var i ListMarketNewsByQdrantPointIDsRow
+		if err := rows.Scan(&i.ID, &i.QdrantPointID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -422,6 +528,25 @@ func (q *Queries) LockIdempotencyRecord(ctx context.Context, arg LockIdempotency
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const setIdempotencyReportID = `-- name: SetIdempotencyReportID :execrows
+UPDATE idempotency_records
+SET report_id = $2, updated_at = now()
+WHERE id = $1 AND status = 'PROCESSING' AND report_id IS NULL
+`
+
+type SetIdempotencyReportIDParams struct {
+	ID       pgtype.UUID
+	ReportID pgtype.UUID
+}
+
+func (q *Queries) SetIdempotencyReportID(ctx context.Context, arg SetIdempotencyReportIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setIdempotencyReportID, arg.ID, arg.ReportID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setMarketNewsStatus = `-- name: SetMarketNewsStatus :execrows

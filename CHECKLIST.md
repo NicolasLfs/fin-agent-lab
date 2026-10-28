@@ -38,55 +38,55 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 
 ## 3. API e serviço Go
 
-- [ ] Inicializar os serviços Go com Uber Fx.
-- [ ] Implementar a API HTTP e validação dos contratos de entrada e saída.
-- [ ] Implementar a API usando `net/http` da biblioteca padrão.
-- [ ] Implementar `POST /recommendations/generate` e exigir `Idempotency-Key`.
-- [ ] Implementar `GET /health/live` e `GET /health/ready`.
-- [ ] Fazer a readiness verificar as conexões com PostgreSQL, Qdrant e Amazon SQS no LocalStack.
-- [ ] Implementar o cálculo determinístico das taxas líquidas e dos indicadores usados no ranking.
-- [ ] Implementar ordenação determinística dos ativos ranqueados.
-- [ ] Passar ao serviço Python os dados calculados em Go como contexto estrito; não delegar cálculos financeiros ao LLM.
-- [ ] Chamar o motor Python via HTTP/REST usando `net/http` e JSON, com timeout e tratamento explícito de respostas e erros.
-- [ ] Configurar o cliente Go com dial timeout de 3 segundos e timeout total dentro da faixa de 30 a 45 segundos.
-- [ ] Tratar timeout do cliente HTTP sem bloquear goroutines nem iniciar novamente uma execução que já possa estar em andamento; atualizar o estado do relatório para reprocessamento ou falha conforme a política definida.
-- [ ] Persistir o relatório final e as referências às cotações e notícias usadas.
+- [x] Inicializar os serviços Go com Uber Fx.
+- [x] Implementar a API HTTP e validação dos contratos de entrada e saída.
+- [x] Implementar a API usando `net/http` da biblioteca padrão.
+- [x] Implementar `POST /recommendations/generate` e exigir `Idempotency-Key`.
+- [x] Implementar `GET /health/live` e `GET /health/ready`.
+- [x] Fazer a readiness verificar as conexões com PostgreSQL, Qdrant e Amazon SQS no LocalStack.
+- [ ] Implementar o cálculo determinístico das taxas líquidas e dos indicadores usados no ranking (aguarda taxas/prazos de renda fixa e indicadores fundamentais, ausentes do schema atual).
+- [ ] Implementar ordenação determinística dos ativos ranqueados (aguarda definição de métricas de comparação; preço isolado não será usado como ranking).
+- [x] Passar ao serviço Python o contexto estrito disponível em Go; não delegar cálculos financeiros ao LLM.
+- [x] Chamar o motor Python via HTTP/REST usando `net/http` e JSON, com timeout e tratamento explícito de respostas e erros.
+- [x] Configurar o cliente Go com dial timeout de 3 segundos e timeout total de 40 segundos.
+- [x] Tratar timeout do cliente HTTP sem iniciar novamente uma execução concorrente; manter o relatório pendente e permitir retomada pelo mesmo `reportId` e `Idempotency-Key`.
+- [x] Persistir o relatório final e as referências às cotações e notícias usadas.
 
 ## 4. Ingestão e mensageria
 
-- [ ] Implementar a coleta configurável de taxas, cotações e notícias nas fontes definidas.
-- [ ] Implementar parsing de RSS e cálculo SHA-256 do conteúdo das notícias.
-- [ ] Persistir notícias e cotações de forma idempotente, inclusive após reinício dos serviços.
-- [ ] Publicar notícias novas na fila SQS `news-processing-queue`.
-- [ ] Configurar visibility timeout, retries e dead-letter queue (DLQ) para mensagens com falha, considerando entrega at-least-once.
-- [ ] Garantir que mensagens repetidas não causem registros ou embeddings duplicados.
-- [ ] Implementar logs estruturados com `correlationId` e `reportId`.
+- [x] Implementar a coleta configurável de taxas, cotações e notícias nas fontes definidas.
+- [x] Implementar parsing de RSS e cálculo SHA-256 do conteúdo das notícias.
+- [x] Persistir notícias e cotações de forma idempotente, inclusive após reinício dos serviços.
+- [x] Publicar notícias novas na fila SQS `news-processing-queue`.
+- [x] Configurar visibility timeout, retries e dead-letter queue (DLQ) para mensagens com falha, considerando entrega at-least-once.
+- [x] Garantir que mensagens repetidas não causem registros ou embeddings duplicados.
+- [x] Implementar logs estruturados com `correlationId` e `reportId`.
 
 ## 5. Agente Python e RAG
 
-- [ ] Configurar o motor de agentes em `/agent`, com Python 3.11+, `pyproject.toml`, backend de build `setuptools` e `uv.lock`.
-- [ ] Instalar e sincronizar dependências com `uv` nos ambientes locais e Docker, respeitando o lockfile.
+- [x] Configurar o motor de agentes em `/agent`, com Python 3.11+, `pyproject.toml`, backend de build `setuptools` e `uv.lock`.
+- [x] Instalar e sincronizar dependências com `uv` nos ambientes locais e Docker, respeitando o lockfile.
 - [x] Configurar `setuptools` como build backend no `pyproject.toml` e validar a construção do pacote Python.
-- [ ] Expor o serviço do motor de agentes com FastAPI e implementar os endpoints internos HTTP/REST consumidos pelo backend Go.
-- [ ] Validar requests e responses JSON da API FastAPI, incluindo erros e campos obrigatórios.
-- [ ] Implementar `POST /internal/agent/run` com os campos de request e response definidos em [ARCHITECTURE.md](./ARCHITECTURE.md).
-- [ ] Retornar erros no envelope padronizado `{ "error": { "code", "message", "retryable" } }` e aplicar o mapeamento de status HTTP acordado.
-- [ ] Configurar handlers FastAPI para retornar `400` para JSON malformado/campos obrigatórios ausentes e reservar `422` para falhas de validação interna das tools.
-- [ ] Manter tentativas de fallback entre modelos OpenRouter dentro do motor Python; retornar `429` ao Go quando a cota estiver esgotada e não houver rota de contingência disponível.
-- [ ] Implementar o worker de embeddings usando o SDK oficial `qdrant-client`.
-- [ ] Integrar a geração de embeddings com o provedor Gemini e configurar o modelo de embedding escolhido.
-- [ ] Persistir no Qdrant o vetor e os metadados `asset_ticker`, `published_at` e `sentiment_score`.
-- [ ] Implementar busca vetorial filtrada para notícias dos últimos sete dias e ativos considerados no ranking.
-- [ ] Implementar o grafo linear LangGraph: busca no Qdrant, análise de risco/bandeiras vermelhas via LLM e formatação do JSON/Markdown de saída.
-- [ ] Integrar o LLM via OpenRouter, priorizando o tier gratuito.
-- [ ] Configurar rotas de contingência no OpenRouter e definir quando alternar para elas diante de falhas, indisponibilidade ou limites do provedor/modelo primário.
-- [ ] Definir o estado do grafo para transportar os dados financeiros calculados pelo Go, notícias recuperadas, `sourceNewsIDs`, análise de risco e resultado final.
-- [ ] Configurar um checkpointer LangGraph conectado ao PostgreSQL para persistir e recuperar o estado das execuções após falhas do motor Python.
-- [ ] Validar e sanitizar entradas e saídas das ferramentas do agente.
-- [ ] Restringir justificativas aos dados fornecidos e às fontes recuperadas para reduzir alucinações.
-- [ ] Tratar indisponibilidade e timeout do LLM sem perder o estado ou o histórico do relatório.
-- [ ] Testar fallback entre a rota gratuita principal e as rotas de contingência do OpenRouter, incluindo erros e limites de uso.
-- [ ] Incluir no relatório os IDs das notícias citadas e das cotações usadas.
+- [x] Expor o serviço do motor de agentes com FastAPI e implementar os endpoints internos HTTP/REST consumidos pelo backend Go.
+- [x] Validar requests e responses JSON da API FastAPI, incluindo erros e campos obrigatórios.
+- [x] Implementar `POST /internal/agent/run` com os campos de request e response definidos em [ARCHITECTURE.md](./ARCHITECTURE.md).
+- [x] Retornar erros no envelope padronizado `{ "error": { "code", "message", "retryable" } }` e aplicar o mapeamento de status HTTP acordado.
+- [x] Configurar handlers FastAPI para retornar `400` para JSON malformado/campos obrigatórios ausentes e reservar `422` para falhas de validação interna das tools.
+- [x] Manter tentativas de fallback entre modelos OpenRouter dentro do motor Python; retornar `429` ao Go quando a cota estiver esgotada e não houver rota de contingência disponível.
+- [x] Implementar o worker de embeddings usando o SDK oficial `qdrant-client`.
+- [x] Integrar a geração de embeddings com o provedor Gemini e configurar o modelo de embedding escolhido.
+- [x] Persistir no Qdrant o vetor e os metadados `asset_ticker`, `published_at` e `sentiment_score`.
+- [x] Implementar busca vetorial filtrada para notícias dos últimos sete dias e ativos considerados no ranking.
+- [x] Implementar o grafo linear LangGraph: busca no Qdrant, análise de risco/bandeiras vermelhas via LLM e formatação do JSON/Markdown de saída.
+- [x] Integrar o LLM via OpenRouter, priorizando o tier gratuito.
+- [x] Configurar rotas de contingência no OpenRouter e definir quando alternar para elas diante de falhas, indisponibilidade ou limites do provedor/modelo primário.
+- [x] Definir o estado do grafo para transportar os dados financeiros calculados pelo Go, notícias recuperadas, `sourceNewsIDs`, análise de risco e resultado final.
+- [x] Configurar um checkpointer LangGraph conectado ao PostgreSQL para persistir e recuperar o estado das execuções após falhas do motor Python.
+- [x] Validar e sanitizar entradas e saídas das ferramentas do agente.
+- [x] Restringir justificativas aos dados fornecidos e às fontes recuperadas para reduzir alucinações.
+- [x] Tratar indisponibilidade e timeout do LLM sem perder o estado ou o histórico do relatório.
+- [x] Testar fallback entre a rota gratuita principal e as rotas de contingência do OpenRouter, incluindo erros e limites de uso.
+- [x] Incluir no relatório os IDs das notícias citadas e das cotações usadas.
 
 ## 6. Idempotência, concorrência e resiliência
 

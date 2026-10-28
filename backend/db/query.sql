@@ -13,6 +13,29 @@ SELECT id, ticker, asset_type, name, created_at
 FROM assets
 ORDER BY ticker;
 
+-- name: ListAssetsForRecommendation :many
+SELECT a.id, a.ticker, a.asset_type,
+       q.id AS quote_id,
+       q.price::text AS reference_price,
+       q.currency
+FROM assets a
+JOIN LATERAL (
+    SELECT id, price, currency
+    FROM quotes
+    WHERE asset_id = a.id
+    ORDER BY quoted_at DESC, id
+    LIMIT 1
+) q ON true
+WHERE a.asset_type = ANY($1::asset_type[])
+  AND a.asset_type <> 'FIXED_INCOME'
+ORDER BY a.ticker;
+
+-- name: ListMarketNewsByQdrantPointIDs :many
+SELECT id, qdrant_point_id
+FROM market_news
+WHERE qdrant_point_id = ANY($1::text[])
+ORDER BY qdrant_point_id;
+
 -- name: UpsertQuote :one
 INSERT INTO quotes (asset_id, source, source_quote_id, price, currency, quoted_at)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -67,6 +90,11 @@ UPDATE idempotency_records
 SET status = 'COMPLETED', report_id = $2, response_body = $3, updated_at = now()
 WHERE id = $1 AND status = 'PROCESSING';
 
+-- name: SetIdempotencyReportID :execrows
+UPDATE idempotency_records
+SET report_id = $2, updated_at = now()
+WHERE id = $1 AND status = 'PROCESSING' AND report_id IS NULL;
+
 -- name: FailIdempotencyRecord :execrows
 UPDATE idempotency_records
 SET status = 'FAILED', updated_at = now()
@@ -76,6 +104,11 @@ WHERE id = $1 AND status = 'PROCESSING';
 INSERT INTO recommendation_reports (ranked_assets)
 VALUES ($1)
 RETURNING id, status, ranked_assets, justification_text, created_at, updated_at;
+
+-- name: GetRecommendationReport :one
+SELECT id, status, ranked_assets, justification_text, created_at, updated_at
+FROM recommendation_reports
+WHERE id = $1;
 
 -- name: CompleteRecommendationReport :execrows
 UPDATE recommendation_reports

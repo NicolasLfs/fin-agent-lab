@@ -10,7 +10,7 @@ estão em [CHALLENGE.md](./CHALLENGE.md), as decisões técnicas em
 
 ```text
 backend/  API e workers em Go; PostgreSQL/sqlc em backend/db
-agent/    Motor de agentes Python (FastAPI e LangGraph planejados)
+agent/    Motor de agentes Python (FastAPI, LangGraph, Gemini e Qdrant)
 infra/
 ├── terraform/  Provisionamento local com Terraform (em estruturação)
 └── k8s/        Manifests Kubernetes nativos (em estruturação)

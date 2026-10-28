@@ -5,6 +5,54 @@ PostgreSQL gerado pelo `sqlc` em `internal/store`. O schema de entrada do `sqlc`
 fica em `db/schema.sql`; migrations versionadas e reversíveis ficam em
 `db/migrations/`.
 
+## API
+
+A aplicação usa Uber Fx para iniciar a API `net/http`. Configure as dependências
+por ambiente; não grave URLs com credenciais em arquivos versionados:
+
+```sh
+export DATABASE_URL="postgres://fin_agent:<senha>@localhost:5432/fin_agent?sslmode=disable"
+export AGENT_URL="http://localhost:8000"
+export QDRANT_URL="http://localhost:6333"
+export LOCALSTACK_URL="http://localhost:4566"
+export HTTP_ADDR=":8080"
+go run .
+```
+
+`HTTP_ADDR` é opcional e assume `:8080`. `DATABASE_URL`, `AGENT_URL`,
+`QDRANT_URL` e `LOCALSTACK_URL` são obrigatórios. A readiness consulta
+PostgreSQL, `GET <QDRANT_URL>/healthz` e
+`GET <LOCALSTACK_URL>/_localstack/health`, exigindo que o serviço SQS apareça
+como `available` ou `running`.
+
+`POST /recommendations/generate` exige `Idempotency-Key` e JSON no formato
+`{"assetTypes":["STOCK","FII"]}`. Repetir a chave e o mesmo pedido reproduz a
+resposta concluída; uma chave com outro pedido retorna `409`. Se o agente ou
+uma dependência estiver indisponível depois da criação do relatório, a API
+retorna `503` retryable e mantém o mesmo `reportId` para a próxima tentativa
+com a mesma chave. Também estão
+disponíveis `GET /health/live` e `GET /health/ready`.
+
+O schema atual contém cotações, mas não contém taxas brutas/prazos de renda
+fixa nem fundamentos de ações/FIIs. Por isso, o serviço só envia preços de
+referência exatos de ações/FIIs com a cotação mais recente; não calcula yield nem
+ordena ativos por preço. Ativos sem os dados determinísticos necessários não
+são apresentados como oportunidades.
+
+## Ingestão de notícias e fila SQS
+
+A biblioteca `internal/ingest` fornece o fluxo mínimo de ingestão de notícias:
+
+- parsing de feeds RSS/Atom em `ParseRSS`
+- cálculo de hash SHA-256 do conteúdo em `ContentHash`
+- payload JSON enviado à fila SQS em `BuildNewsProcessingMessage`
+- publicador do LocalStack em `SQSClient.PublishNews`
+
+Use o código para persistir o item no PostgreSQL com idempotência pelo `contentHash`
+antes de publicar a mensagem na fila `news-processing-queue`. Para deploy local,
+configure `NEWS_PROCESSING_QUEUE_URL` ou use o valor padrão do LocalStack em
+`http://localhost:4566/000000000000/news-processing-queue`.
+
 ## PostgreSQL local
 
 O Compose da raiz executa PostgreSQL 18 e mantém os dados no volume

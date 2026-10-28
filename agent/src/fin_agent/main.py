@@ -1,0 +1,5 @@
+import uvicorn
+
+
+def run() -> None:
+    uvicorn.run("fin_agent.api:app", host="0.0.0.0", port=8080)
