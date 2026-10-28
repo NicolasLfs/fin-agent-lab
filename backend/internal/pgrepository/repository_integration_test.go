@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"fin-agent/internal/agentclient"
 	"fin-agent/internal/httpapi"
+	"fin-agent/internal/marketworker"
 	"fin-agent/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -62,12 +64,18 @@ func TestExecuteIsIdempotentAcrossConcurrentRequestsAndRetries(t *testing.T) {
 	}
 	defer pool.Close()
 
-	migration, err := os.ReadFile(filepath.Join("..", "..", "db", "migrations", "000001_persistence_domain.up.sql"))
-	if err != nil {
-		t.Fatalf("read persistence migration: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(migration)); err != nil {
-		t.Fatalf("apply persistence migration: %v", err)
+	for _, migrationName := range []string{
+		"000001_persistence_domain.up.sql",
+		"000002_deterministic_market_indicators.up.sql",
+		"000003_market_data_sync_status.up.sql",
+	} {
+		migration, err := os.ReadFile(filepath.Join("..", "..", "db", "migrations", migrationName))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", migrationName, err)
+		}
+		if _, err := pool.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", migrationName, err)
+		}
 	}
 	var assetID string
 	if err := pool.QueryRow(ctx,
@@ -75,11 +83,12 @@ func TestExecuteIsIdempotentAcrossConcurrentRequestsAndRetries(t *testing.T) {
 	).Scan(&assetID); err != nil {
 		t.Fatalf("insert test asset: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
-		"INSERT INTO quotes (asset_id, source, source_quote_id, price, currency, quoted_at) VALUES ($1, 'test', 'quote-1', 68.50, 'BRL', now())",
-		assetID,
-	); err != nil {
-		t.Fatalf("insert test quote: %v", err)
+	if err := marketworker.New(
+		marketworker.NewPostgresRepository(pool),
+		integrationMarketDataSource{collectedAt: time.Now().UTC()},
+		time.Now,
+	).RunOnce(ctx); err != nil {
+		t.Fatalf("run market ingestion worker: %v", err)
 	}
 
 	const concurrentNewsIngestions = 50
@@ -93,6 +102,7 @@ func TestExecuteIsIdempotentAcrossConcurrentRequestsAndRetries(t *testing.T) {
 		Url:         "https://example.test/news",
 		PublishedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
 	}
+
 	var newsWorkers sync.WaitGroup
 	for range concurrentNewsIngestions {
 		newsWorkers.Add(1)
@@ -143,12 +153,19 @@ func TestExecuteIsIdempotentAcrossConcurrentRequestsAndRetries(t *testing.T) {
 	var agentCalls atomic.Int32
 	var workers sync.WaitGroup
 
-	invoke := func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error) {
+	invoke := func(_ context.Context, payload agentclient.RunRequest) (agentclient.RunResponse, error) {
+		if len(payload.RankedAssets) != 1 || payload.RankedAssets[0].Ticker != "TEST3" ||
+			payload.RankedAssets[0].Score != "0.1000" ||
+			payload.DeterministicContext.StocksAndFiis[0].ReferencePrice != "68.50" {
+			return agentclient.RunResponse{}, fmt.Errorf("unexpected Go-calculated agent request: %#v", payload)
+		}
 		agentCalls.Add(1)
 		time.Sleep(50 * time.Millisecond)
 		return agentclient.RunResponse{
-			Status:            "COMPLETED",
-			RankedAssets:      []agentclient.RankedAsset{{Rank: 1, Ticker: "TEST3", Type: "STOCK"}},
+			Status: "COMPLETED",
+			RankedAssets: []agentclient.RankedAsset{
+				{Rank: 1, Ticker: "TEST3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+			},
 			JustificationText: "Grounded test response.",
 			CitedNewsIDs:      []string{},
 		}, nil
@@ -231,5 +248,61 @@ func TestExecuteIsIdempotentAcrossConcurrentRequestsAndRetries(t *testing.T) {
 	}
 	if reportCount != 2 {
 		t.Fatalf("recommendation report count after retry = %d, want 2", reportCount)
+	}
+
+	invokedWithoutFIIData := false
+	_, missingErr := repository.Execute(ctx, "missing-fii", httpapi.GenerateRequest{
+		AssetTypes: []httpapi.AssetType{httpapi.AssetTypeFII},
+	}, func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error) {
+		invokedWithoutFIIData = true
+		return agentclient.RunResponse{}, nil
+	})
+	var missingFailure *httpapi.Failure
+	if !errors.As(missingErr, &missingFailure) || missingFailure.Status != http.StatusUnprocessableEntity ||
+		missingFailure.Retryable || invokedWithoutFIIData {
+		t.Fatalf("missing-data Execute() = error %v, agent invoked %v; want non-retryable 422", missingErr, invokedWithoutFIIData)
+	}
+	_, repeatedMissingErr := repository.Execute(ctx, "missing-fii", httpapi.GenerateRequest{
+		AssetTypes: []httpapi.AssetType{httpapi.AssetTypeFII},
+	}, func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error) {
+		t.Fatal("agent must not run when FII data is absent")
+		return agentclient.RunResponse{}, nil
+	})
+	var repeatedFailure *httpapi.Failure
+	if !errors.As(repeatedMissingErr, &repeatedFailure) ||
+		repeatedFailure.Status != missingFailure.Status || repeatedFailure.Code != missingFailure.Code {
+		t.Fatalf("repeated missing-data failure = %v, want the original 422 failure", repeatedMissingErr)
+	}
+
+	var staleFIIID string
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO assets (ticker, asset_type, name) VALUES ('STALE11', 'FII', 'Stale FII') RETURNING id",
+	).Scan(&staleFIIID); err != nil {
+		t.Fatalf("insert stale FII: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO quotes (asset_id, source, source_quote_id, price, currency, quoted_at) VALUES ($1, 'test', 'stale-quote', 10.00, 'BRL', now() - interval '25 hours')",
+		staleFIIID,
+	); err != nil {
+		t.Fatalf("insert stale FII quote: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO asset_indicators (
+			asset_id, source, source_record_id, observed_at, dividend_yield_ttm, raw_payload
+		) VALUES ($1, 'test-provider', 'stale-dy', now() - interval '25 hours', 0.05, '{"dy":0.05}')`,
+		staleFIIID,
+	); err != nil {
+		t.Fatalf("insert stale FII indicator: %v", err)
+	}
+	_, staleErr := repository.Execute(ctx, "stale-fii", httpapi.GenerateRequest{
+		AssetTypes: []httpapi.AssetType{httpapi.AssetTypeFII},
+	}, func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error) {
+		t.Fatal("agent must not run with stale FII data")
+		return agentclient.RunResponse{}, nil
+	})
+	var staleFailure *httpapi.Failure
+	if !errors.As(staleErr, &staleFailure) || staleFailure.Status != http.StatusServiceUnavailable ||
+		!staleFailure.Retryable {
+		t.Fatalf("stale-data Execute() error = %v, want retryable 503", staleErr)
 	}
 }

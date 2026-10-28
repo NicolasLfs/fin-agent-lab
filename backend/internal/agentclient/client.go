@@ -28,8 +28,11 @@ type StockOrFII struct {
 }
 
 type FixedIncomeRate struct {
-	Ticker  string `json:"ticker"`
-	NetRate string `json:"netRate"`
+	Ticker    string `json:"ticker"`
+	Basis     string `json:"basis"`
+	Source    string `json:"source"`
+	GrossRate string `json:"grossRate"`
+	NetRate   string `json:"netRate"`
 }
 
 type DeterministicContext struct {
@@ -40,13 +43,16 @@ type DeterministicContext struct {
 type RunRequest struct {
 	ReportID             string               `json:"reportId"`
 	DeterministicContext DeterministicContext `json:"deterministicContext"`
+	RankedAssets         []RankedAsset        `json:"rankedAssets"`
 	AssetTypes           []string             `json:"assetTypes"`
 }
 
 type RankedAsset struct {
-	Rank   int    `json:"rank"`
-	Ticker string `json:"ticker"`
-	Type   string `json:"type"`
+	Rank        int    `json:"rank"`
+	Ticker      string `json:"ticker"`
+	Type        string `json:"type"`
+	Score       string `json:"score"`
+	ScoreMetric string `json:"scoreMetric"`
 }
 
 type RunResponse struct {

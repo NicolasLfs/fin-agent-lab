@@ -44,8 +44,8 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 - [x] Implementar `POST /recommendations/generate` e exigir `Idempotency-Key`.
 - [x] Implementar `GET /health/live` e `GET /health/ready`.
 - [x] Fazer a readiness verificar as conexões com PostgreSQL, Qdrant e Amazon SQS no LocalStack.
-- [ ] Implementar o cálculo determinístico das taxas líquidas e dos indicadores usados no ranking (aguarda taxas/prazos de renda fixa e indicadores fundamentais, ausentes do schema atual).
-- [ ] Implementar ordenação determinística dos ativos ranqueados (aguarda definição de métricas de comparação; preço isolado não será usado como ranking).
+- [x] Implementar cálculo determinístico da taxa líquida de referência Selic/SGS no horizonte hipotético de 1.095 dias e scores E/P positivo para ações e DY TTM para FIIs; usar precisão racional sem ponto flutuante.
+- [x] Implementar ranking unificado decrescente por score anual, com desempate alfabético por ticker; Go define as posições e o agente não pode reordenar. Exigir dados recentes para cada classe solicitada; responder `422` para ausência estrutural e `503` para dados vencidos.
 - [x] Passar ao serviço Python o contexto estrito disponível em Go; não delegar cálculos financeiros ao LLM.
 - [x] Chamar o motor Python via HTTP/REST usando `net/http` e JSON, com timeout e tratamento explícito de respostas e erros.
 - [x] Configurar o cliente Go com dial timeout de 3 segundos e timeout total de 40 segundos.
@@ -61,6 +61,8 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 - [x] Configurar visibility timeout, retries e dead-letter queue (DLQ) para mensagens com falha, considerando entrega at-least-once.
 - [x] Garantir que mensagens repetidas não causem registros ou embeddings duplicados.
 - [x] Implementar logs estruturados com `correlationId` e `reportId`.
+- [x] Sincronizar SGS/BCB 432/433 e Brapi via worker Go separado; persistir cotação, indicadores, timestamp de coleta e payload bruto com decimal exato.
+- [x] Persistir status de sincronização para distinguir upstream temporário (`503` retryable) de dado/plano permanentemente indisponível (`422`).
 
 ## 5. Agente Python e RAG
 
@@ -101,7 +103,7 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 ## 7. Testes
 
 - [ ] Testar invariantes de `Money` e rejeição de entradas inválidas.
-- [ ] Testar cálculos financeiros e ordenação determinística sem uso de ponto flutuante.
+- [x] Testar cálculo de taxa líquida, métricas e ordenação determinística sem uso de ponto flutuante.
 - [ ] Testar parsing de RSS e deduplicação por SHA-256.
 - [ ] Testar esquemas de entrada, sanitização de texto e filtros de busca do Qdrant.
 - [ ] Testar serialização e validação dos contratos JSON entre Go e FastAPI, o envelope de erro e o mapeamento de status HTTP.

@@ -42,9 +42,11 @@ type GenerateRequest struct {
 }
 
 type RankedAsset struct {
-	Rank   int       `json:"rank"`
-	Ticker string    `json:"ticker"`
-	Type   AssetType `json:"type"`
+	Rank        int       `json:"rank"`
+	Ticker      string    `json:"ticker"`
+	Type        AssetType `json:"type"`
+	Score       string    `json:"score"`
+	ScoreMetric string    `json:"scoreMetric"`
 }
 
 type Summary struct {

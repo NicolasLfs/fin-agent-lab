@@ -36,18 +36,10 @@ def build_rag_graph(retriever: Retriever, analyzer: Analyzer, checkpointer):
     def format_response(state: AgentState) -> dict[str, Any]:
         request = RunRequest.model_validate(state["request"])
         risk = RiskAnalysis.model_validate(state["risk"])
-        types_by_ticker = {
-            item.ticker: "FIXED_INCOME"
-            for item in request.deterministic_context.fixed_income_rates
-        }
-        types_by_ticker.update(
-            {item.ticker: item.type for item in request.deterministic_context.stocks_and_fiis}
-        )
         response = RunResponse(
             status="COMPLETED",
             rankedAssets=[
-                {"rank": rank, "ticker": ticker, "type": types_by_ticker[ticker]}
-                for rank, ticker in enumerate(risk.ranked_tickers, start=1)
+                asset.model_dump(by_alias=True) for asset in request.ranked_assets
             ],
             justificationText=risk.justification_text,
             citedNewsIds=risk.cited_news_ids,

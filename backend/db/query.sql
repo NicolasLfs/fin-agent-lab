@@ -13,22 +13,87 @@ SELECT id, ticker, asset_type, name, created_at
 FROM assets
 ORDER BY ticker;
 
--- name: ListAssetsForRecommendation :many
+-- name: UpsertMarketAsset :one
+INSERT INTO assets (ticker, asset_type, name)
+VALUES ($1, $2, $3)
+ON CONFLICT (ticker) DO UPDATE SET ticker = EXCLUDED.ticker
+RETURNING id, ticker, asset_type, name, created_at;
+
+-- name: ListMarketAssets :many
+SELECT id, ticker, asset_type
+FROM assets
+WHERE asset_type IN ('STOCK', 'FII')
+   OR ticker IN ('SELIC_SGS_432', 'IPCA_SGS_433')
+ORDER BY ticker;
+
+-- name: ListRecommendationCandidates :many
 SELECT a.id, a.ticker, a.asset_type,
        q.id AS quote_id,
        q.price::text AS reference_price,
-       q.currency
+       q.currency,
+       q.quoted_at,
+       COALESCE(i.price_to_earnings::text, ''::text)::varchar AS price_to_earnings,
+       COALESCE(i.dividend_yield_ttm::text, ''::text)::varchar AS dividend_yield_ttm,
+       COALESCE(i.annual_reference_rate::text, ''::text)::varchar AS annual_reference_rate,
+       COALESCE(i.source, ''::text)::varchar AS indicator_source,
+       i.observed_at AS indicator_observed_at,
+       sync.attempted_at AS sync_attempted_at,
+       COALESCE(sync.error_code, ''::text)::varchar AS sync_error_code,
+       COALESCE(sync.error_message, ''::text)::varchar AS sync_error_message,
+       COALESCE(sync.retryable, false) AS sync_retryable
 FROM assets a
-JOIN LATERAL (
-    SELECT id, price, currency
+LEFT JOIN LATERAL (
+    SELECT id, price, currency, quoted_at
     FROM quotes
     WHERE asset_id = a.id
     ORDER BY quoted_at DESC, id
     LIMIT 1
 ) q ON true
+LEFT JOIN LATERAL (
+    SELECT price_to_earnings, dividend_yield_ttm, annual_reference_rate,
+           source, observed_at
+    FROM asset_indicators
+    WHERE asset_id = a.id
+    ORDER BY observed_at DESC, id DESC
+    LIMIT 1
+) i ON true
+LEFT JOIN LATERAL (
+    SELECT attempted_at, error_code, error_message, retryable
+    FROM market_data_sync_status
+    WHERE asset_id = a.id
+    ORDER BY attempted_at DESC, data_kind
+    LIMIT 1
+) sync ON true
 WHERE a.asset_type::text = ANY($1::text[])
-  AND a.asset_type <> 'FIXED_INCOME'
 ORDER BY a.ticker;
+
+-- name: UpsertAssetIndicator :one
+INSERT INTO asset_indicators (
+    asset_id, source, source_record_id, observed_at, price_to_earnings,
+    dividend_yield_ttm, annual_reference_rate, raw_payload, inflation_rate
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (source, source_record_id) DO UPDATE
+SET observed_at = EXCLUDED.observed_at,
+    price_to_earnings = EXCLUDED.price_to_earnings,
+    dividend_yield_ttm = EXCLUDED.dividend_yield_ttm,
+    annual_reference_rate = EXCLUDED.annual_reference_rate,
+    inflation_rate = EXCLUDED.inflation_rate,
+    raw_payload = EXCLUDED.raw_payload
+RETURNING id, asset_id, source, source_record_id, observed_at, price_to_earnings,
+          dividend_yield_ttm, annual_reference_rate, raw_payload, created_at, inflation_rate;
+
+-- name: RecordMarketDataSyncStatus :exec
+INSERT INTO market_data_sync_status (
+    asset_id, data_kind, source, attempted_at, error_code, error_message, retryable
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (asset_id, data_kind) DO UPDATE
+SET source = EXCLUDED.source,
+    attempted_at = EXCLUDED.attempted_at,
+    error_code = EXCLUDED.error_code,
+    error_message = EXCLUDED.error_message,
+    retryable = EXCLUDED.retryable;
 
 -- name: ListMarketNewsByQdrantPointIDs :many
 SELECT id, qdrant_point_id
@@ -40,7 +105,9 @@ ORDER BY qdrant_point_id;
 INSERT INTO quotes (asset_id, source, source_quote_id, price, currency, quoted_at)
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (source, source_quote_id) DO UPDATE
-SET source_quote_id = EXCLUDED.source_quote_id
+SET price = EXCLUDED.price,
+    currency = EXCLUDED.currency,
+    quoted_at = EXCLUDED.quoted_at
 RETURNING id, asset_id, source, source_quote_id, price, currency, quoted_at, created_at;
 
 -- name: ListQuotesForAsset :many
@@ -80,7 +147,8 @@ RETURNING id, operation, idempotency_key, request_hash, status, report_id,
 
 -- name: LockIdempotencyRecord :one
 SELECT id, operation, idempotency_key, request_hash, status, report_id,
-       response_body, created_at, updated_at
+       response_body, failure_status, failure_code, failure_message,
+       failure_retryable, created_at, updated_at
 FROM idempotency_records
 WHERE operation = $1 AND idempotency_key = $2
 FOR UPDATE;
@@ -98,6 +166,12 @@ WHERE id = $1 AND status = 'PROCESSING' AND report_id IS NULL;
 -- name: FailIdempotencyRecord :execrows
 UPDATE idempotency_records
 SET status = 'FAILED', updated_at = now()
+WHERE id = $1 AND status = 'PROCESSING';
+
+-- name: FailIdempotencyRecordWithError :execrows
+UPDATE idempotency_records
+SET status = 'FAILED', failure_status = $2, failure_code = $3,
+    failure_message = $4, failure_retryable = $5, updated_at = now()
 WHERE id = $1 AND status = 'PROCESSING';
 
 -- name: CreateRecommendationReport :one

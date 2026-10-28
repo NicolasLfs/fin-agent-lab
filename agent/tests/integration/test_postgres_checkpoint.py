@@ -31,7 +31,7 @@ async def test_postgres_checkpoint_resumes_after_risk_node_failure():
             if calls["analysis"] == 1:
                 raise ProviderUnavailableError("simulated temporary model outage")
             return RiskAnalysis(
-                rankedTickers=["VALE3"],
+                riskTickers=["VALE3"],
                 justificationText="No recent news was retrieved.",
                 citedNewsIds=[],
             )
@@ -43,6 +43,15 @@ async def test_postgres_checkpoint_resumes_after_risk_node_failure():
                 "fixedIncomeRates": [],
                 "stocksAndFiis": [{"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"}],
             },
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                }
+            ],
             "assetTypes": ["STOCK"],
         }
     )

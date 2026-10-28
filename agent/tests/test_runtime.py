@@ -13,6 +13,15 @@ async def test_runtime_correlates_langgraph_checkpoint_with_stable_report_id():
                 "fixedIncomeRates": [],
                 "stocksAndFiis": [{"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"}],
             },
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                }
+            ],
             "assetTypes": ["STOCK"],
         }
     )
@@ -28,7 +37,15 @@ async def test_runtime_correlates_langgraph_checkpoint_with_stable_report_id():
             return {
                 "response": {
                     "status": "COMPLETED",
-                    "rankedAssets": [{"rank": 1, "ticker": "VALE3", "type": "STOCK"}],
+                    "rankedAssets": [
+                        {
+                            "rank": 1,
+                            "ticker": "VALE3",
+                            "type": "STOCK",
+                            "score": "0.1000",
+                            "scoreMetric": "EARNINGS_YIELD",
+                        }
+                    ],
                     "justificationText": "Grounded analysis.",
                     "citedNewsIds": [],
                 }
@@ -41,7 +58,15 @@ async def test_runtime_correlates_langgraph_checkpoint_with_stable_report_id():
     assert response == RunResponse.model_validate(
         {
             "status": "COMPLETED",
-            "rankedAssets": [{"rank": 1, "ticker": "VALE3", "type": "STOCK"}],
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                }
+            ],
             "justificationText": "Grounded analysis.",
             "citedNewsIds": [],
         }
@@ -59,6 +84,15 @@ async def test_runtime_returns_completed_checkpoint_without_replaying_graph():
                 "fixedIncomeRates": [],
                 "stocksAndFiis": [{"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"}],
             },
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                }
+            ],
             "assetTypes": ["STOCK"],
         }
     )
@@ -73,7 +107,15 @@ async def test_runtime_returns_completed_checkpoint_without_replaying_graph():
                     "values": {
                         "response": {
                             "status": "COMPLETED",
-                            "rankedAssets": [{"rank": 1, "ticker": "VALE3", "type": "STOCK"}],
+                            "rankedAssets": [
+                                {
+                                    "rank": 1,
+                                    "ticker": "VALE3",
+                                    "type": "STOCK",
+                                    "score": "0.1000",
+                                    "scoreMetric": "EARNINGS_YIELD",
+                                }
+                            ],
                             "justificationText": "Previously completed.",
                             "citedNewsIds": ["qdrant-id"],
                         }

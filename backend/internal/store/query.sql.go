@@ -90,9 +90,21 @@ type CreateIdempotencyRecordParams struct {
 	RequestHash    string
 }
 
-func (q *Queries) CreateIdempotencyRecord(ctx context.Context, arg CreateIdempotencyRecordParams) (IdempotencyRecord, error) {
+type CreateIdempotencyRecordRow struct {
+	ID             pgtype.UUID
+	Operation      string
+	IdempotencyKey string
+	RequestHash    string
+	Status         IdempotencyStatus
+	ReportID       pgtype.UUID
+	ResponseBody   []byte
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}
+
+func (q *Queries) CreateIdempotencyRecord(ctx context.Context, arg CreateIdempotencyRecordParams) (CreateIdempotencyRecordRow, error) {
 	row := q.db.QueryRow(ctx, createIdempotencyRecord, arg.Operation, arg.IdempotencyKey, arg.RequestHash)
-	var i IdempotencyRecord
+	var i CreateIdempotencyRecordRow
 	err := row.Scan(
 		&i.ID,
 		&i.Operation,
@@ -135,6 +147,35 @@ WHERE id = $1 AND status = 'PROCESSING'
 
 func (q *Queries) FailIdempotencyRecord(ctx context.Context, id pgtype.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, failIdempotencyRecord, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const failIdempotencyRecordWithError = `-- name: FailIdempotencyRecordWithError :execrows
+UPDATE idempotency_records
+SET status = 'FAILED', failure_status = $2, failure_code = $3,
+    failure_message = $4, failure_retryable = $5, updated_at = now()
+WHERE id = $1 AND status = 'PROCESSING'
+`
+
+type FailIdempotencyRecordWithErrorParams struct {
+	ID               pgtype.UUID
+	FailureStatus    pgtype.Int4
+	FailureCode      pgtype.Text
+	FailureMessage   pgtype.Text
+	FailureRetryable pgtype.Bool
+}
+
+func (q *Queries) FailIdempotencyRecordWithError(ctx context.Context, arg FailIdempotencyRecordWithErrorParams) (int64, error) {
+	result, err := q.db.Exec(ctx, failIdempotencyRecordWithError,
+		arg.ID,
+		arg.FailureStatus,
+		arg.FailureCode,
+		arg.FailureMessage,
+		arg.FailureRetryable,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -300,50 +341,30 @@ func (q *Queries) ListAssets(ctx context.Context) ([]Asset, error) {
 	return items, nil
 }
 
-const listAssetsForRecommendation = `-- name: ListAssetsForRecommendation :many
-SELECT a.id, a.ticker, a.asset_type,
-       q.id AS quote_id,
-       q.price::text AS reference_price,
-       q.currency
-FROM assets a
-JOIN LATERAL (
-    SELECT id, price, currency
-    FROM quotes
-    WHERE asset_id = a.id
-    ORDER BY quoted_at DESC, id
-    LIMIT 1
-) q ON true
-WHERE a.asset_type::text = ANY($1::text[])
-  AND a.asset_type <> 'FIXED_INCOME'
-ORDER BY a.ticker
+const listMarketAssets = `-- name: ListMarketAssets :many
+SELECT id, ticker, asset_type
+FROM assets
+WHERE asset_type IN ('STOCK', 'FII')
+   OR ticker IN ('SELIC_SGS_432', 'IPCA_SGS_433')
+ORDER BY ticker
 `
 
-type ListAssetsForRecommendationRow struct {
-	ID             pgtype.UUID
-	Ticker         string
-	AssetType      AssetType
-	QuoteID        pgtype.UUID
-	ReferencePrice string
-	Currency       string
+type ListMarketAssetsRow struct {
+	ID        pgtype.UUID
+	Ticker    string
+	AssetType AssetType
 }
 
-func (q *Queries) ListAssetsForRecommendation(ctx context.Context, dollar_1 []string) ([]ListAssetsForRecommendationRow, error) {
-	rows, err := q.db.Query(ctx, listAssetsForRecommendation, dollar_1)
+func (q *Queries) ListMarketAssets(ctx context.Context) ([]ListMarketAssetsRow, error) {
+	rows, err := q.db.Query(ctx, listMarketAssets)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListAssetsForRecommendationRow
+	var items []ListMarketAssetsRow
 	for rows.Next() {
-		var i ListAssetsForRecommendationRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.Ticker,
-			&i.AssetType,
-			&i.QuoteID,
-			&i.ReferencePrice,
-			&i.Currency,
-		); err != nil {
+		var i ListMarketAssetsRow
+		if err := rows.Scan(&i.ID, &i.Ticker, &i.AssetType); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -411,6 +432,104 @@ func (q *Queries) ListQuotesForAsset(ctx context.Context, assetID pgtype.UUID) (
 			&i.Currency,
 			&i.QuotedAt,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecommendationCandidates = `-- name: ListRecommendationCandidates :many
+SELECT a.id, a.ticker, a.asset_type,
+       q.id AS quote_id,
+       q.price::text AS reference_price,
+       q.currency,
+       q.quoted_at,
+       COALESCE(i.price_to_earnings::text, ''::text)::varchar AS price_to_earnings,
+       COALESCE(i.dividend_yield_ttm::text, ''::text)::varchar AS dividend_yield_ttm,
+       COALESCE(i.annual_reference_rate::text, ''::text)::varchar AS annual_reference_rate,
+       COALESCE(i.source, ''::text)::varchar AS indicator_source,
+       i.observed_at AS indicator_observed_at,
+       sync.attempted_at AS sync_attempted_at,
+       COALESCE(sync.error_code, ''::text)::varchar AS sync_error_code,
+       COALESCE(sync.error_message, ''::text)::varchar AS sync_error_message,
+       COALESCE(sync.retryable, false) AS sync_retryable
+FROM assets a
+LEFT JOIN LATERAL (
+    SELECT id, price, currency, quoted_at
+    FROM quotes
+    WHERE asset_id = a.id
+    ORDER BY quoted_at DESC, id
+    LIMIT 1
+) q ON true
+LEFT JOIN LATERAL (
+    SELECT price_to_earnings, dividend_yield_ttm, annual_reference_rate,
+           source, observed_at
+    FROM asset_indicators
+    WHERE asset_id = a.id
+    ORDER BY observed_at DESC, id DESC
+    LIMIT 1
+) i ON true
+LEFT JOIN LATERAL (
+    SELECT attempted_at, error_code, error_message, retryable
+    FROM market_data_sync_status
+    WHERE asset_id = a.id
+    ORDER BY attempted_at DESC, data_kind
+    LIMIT 1
+) sync ON true
+WHERE a.asset_type::text = ANY($1::text[])
+ORDER BY a.ticker
+`
+
+type ListRecommendationCandidatesRow struct {
+	ID                  pgtype.UUID
+	Ticker              string
+	AssetType           AssetType
+	QuoteID             pgtype.UUID
+	ReferencePrice      string
+	Currency            string
+	QuotedAt            pgtype.Timestamptz
+	PriceToEarnings     string
+	DividendYieldTtm    string
+	AnnualReferenceRate string
+	IndicatorSource     string
+	IndicatorObservedAt pgtype.Timestamptz
+	SyncAttemptedAt     pgtype.Timestamptz
+	SyncErrorCode       string
+	SyncErrorMessage    string
+	SyncRetryable       bool
+}
+
+func (q *Queries) ListRecommendationCandidates(ctx context.Context, dollar_1 []string) ([]ListRecommendationCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listRecommendationCandidates, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRecommendationCandidatesRow
+	for rows.Next() {
+		var i ListRecommendationCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ticker,
+			&i.AssetType,
+			&i.QuoteID,
+			&i.ReferencePrice,
+			&i.Currency,
+			&i.QuotedAt,
+			&i.PriceToEarnings,
+			&i.DividendYieldTtm,
+			&i.AnnualReferenceRate,
+			&i.IndicatorSource,
+			&i.IndicatorObservedAt,
+			&i.SyncAttemptedAt,
+			&i.SyncErrorCode,
+			&i.SyncErrorMessage,
+			&i.SyncRetryable,
 		); err != nil {
 			return nil, err
 		}
@@ -502,7 +621,8 @@ func (q *Queries) ListRecommendationReportQuotes(ctx context.Context, reportID p
 
 const lockIdempotencyRecord = `-- name: LockIdempotencyRecord :one
 SELECT id, operation, idempotency_key, request_hash, status, report_id,
-       response_body, created_at, updated_at
+       response_body, failure_status, failure_code, failure_message,
+       failure_retryable, created_at, updated_at
 FROM idempotency_records
 WHERE operation = $1 AND idempotency_key = $2
 FOR UPDATE
@@ -513,9 +633,25 @@ type LockIdempotencyRecordParams struct {
 	IdempotencyKey string
 }
 
-func (q *Queries) LockIdempotencyRecord(ctx context.Context, arg LockIdempotencyRecordParams) (IdempotencyRecord, error) {
+type LockIdempotencyRecordRow struct {
+	ID               pgtype.UUID
+	Operation        string
+	IdempotencyKey   string
+	RequestHash      string
+	Status           IdempotencyStatus
+	ReportID         pgtype.UUID
+	ResponseBody     []byte
+	FailureStatus    pgtype.Int4
+	FailureCode      pgtype.Text
+	FailureMessage   pgtype.Text
+	FailureRetryable pgtype.Bool
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
+func (q *Queries) LockIdempotencyRecord(ctx context.Context, arg LockIdempotencyRecordParams) (LockIdempotencyRecordRow, error) {
 	row := q.db.QueryRow(ctx, lockIdempotencyRecord, arg.Operation, arg.IdempotencyKey)
-	var i IdempotencyRecord
+	var i LockIdempotencyRecordRow
 	err := row.Scan(
 		&i.ID,
 		&i.Operation,
@@ -524,10 +660,50 @@ func (q *Queries) LockIdempotencyRecord(ctx context.Context, arg LockIdempotency
 		&i.Status,
 		&i.ReportID,
 		&i.ResponseBody,
+		&i.FailureStatus,
+		&i.FailureCode,
+		&i.FailureMessage,
+		&i.FailureRetryable,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const recordMarketDataSyncStatus = `-- name: RecordMarketDataSyncStatus :exec
+INSERT INTO market_data_sync_status (
+    asset_id, data_kind, source, attempted_at, error_code, error_message, retryable
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (asset_id, data_kind) DO UPDATE
+SET source = EXCLUDED.source,
+    attempted_at = EXCLUDED.attempted_at,
+    error_code = EXCLUDED.error_code,
+    error_message = EXCLUDED.error_message,
+    retryable = EXCLUDED.retryable
+`
+
+type RecordMarketDataSyncStatusParams struct {
+	AssetID      pgtype.UUID
+	DataKind     string
+	Source       string
+	AttemptedAt  pgtype.Timestamptz
+	ErrorCode    pgtype.Text
+	ErrorMessage pgtype.Text
+	Retryable    bool
+}
+
+func (q *Queries) RecordMarketDataSyncStatus(ctx context.Context, arg RecordMarketDataSyncStatusParams) error {
+	_, err := q.db.Exec(ctx, recordMarketDataSyncStatus,
+		arg.AssetID,
+		arg.DataKind,
+		arg.Source,
+		arg.AttemptedAt,
+		arg.ErrorCode,
+		arg.ErrorMessage,
+		arg.Retryable,
+	)
+	return err
 }
 
 const setIdempotencyReportID = `-- name: SetIdempotencyReportID :execrows
@@ -566,6 +742,90 @@ func (q *Queries) SetMarketNewsStatus(ctx context.Context, arg SetMarketNewsStat
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const upsertAssetIndicator = `-- name: UpsertAssetIndicator :one
+INSERT INTO asset_indicators (
+    asset_id, source, source_record_id, observed_at, price_to_earnings,
+    dividend_yield_ttm, annual_reference_rate, raw_payload, inflation_rate
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (source, source_record_id) DO UPDATE
+SET observed_at = EXCLUDED.observed_at,
+    price_to_earnings = EXCLUDED.price_to_earnings,
+    dividend_yield_ttm = EXCLUDED.dividend_yield_ttm,
+    annual_reference_rate = EXCLUDED.annual_reference_rate,
+    inflation_rate = EXCLUDED.inflation_rate,
+    raw_payload = EXCLUDED.raw_payload
+RETURNING id, asset_id, source, source_record_id, observed_at, price_to_earnings,
+          dividend_yield_ttm, annual_reference_rate, raw_payload, created_at, inflation_rate
+`
+
+type UpsertAssetIndicatorParams struct {
+	AssetID             pgtype.UUID
+	Source              string
+	SourceRecordID      string
+	ObservedAt          pgtype.Timestamptz
+	PriceToEarnings     pgtype.Numeric
+	DividendYieldTtm    pgtype.Numeric
+	AnnualReferenceRate pgtype.Numeric
+	RawPayload          []byte
+	InflationRate       pgtype.Numeric
+}
+
+func (q *Queries) UpsertAssetIndicator(ctx context.Context, arg UpsertAssetIndicatorParams) (AssetIndicator, error) {
+	row := q.db.QueryRow(ctx, upsertAssetIndicator,
+		arg.AssetID,
+		arg.Source,
+		arg.SourceRecordID,
+		arg.ObservedAt,
+		arg.PriceToEarnings,
+		arg.DividendYieldTtm,
+		arg.AnnualReferenceRate,
+		arg.RawPayload,
+		arg.InflationRate,
+	)
+	var i AssetIndicator
+	err := row.Scan(
+		&i.ID,
+		&i.AssetID,
+		&i.Source,
+		&i.SourceRecordID,
+		&i.ObservedAt,
+		&i.PriceToEarnings,
+		&i.DividendYieldTtm,
+		&i.AnnualReferenceRate,
+		&i.RawPayload,
+		&i.CreatedAt,
+		&i.InflationRate,
+	)
+	return i, err
+}
+
+const upsertMarketAsset = `-- name: UpsertMarketAsset :one
+INSERT INTO assets (ticker, asset_type, name)
+VALUES ($1, $2, $3)
+ON CONFLICT (ticker) DO UPDATE SET ticker = EXCLUDED.ticker
+RETURNING id, ticker, asset_type, name, created_at
+`
+
+type UpsertMarketAssetParams struct {
+	Ticker    string
+	AssetType AssetType
+	Name      string
+}
+
+func (q *Queries) UpsertMarketAsset(ctx context.Context, arg UpsertMarketAssetParams) (Asset, error) {
+	row := q.db.QueryRow(ctx, upsertMarketAsset, arg.Ticker, arg.AssetType, arg.Name)
+	var i Asset
+	err := row.Scan(
+		&i.ID,
+		&i.Ticker,
+		&i.AssetType,
+		&i.Name,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const upsertMarketNews = `-- name: UpsertMarketNews :one
@@ -613,7 +873,9 @@ const upsertQuote = `-- name: UpsertQuote :one
 INSERT INTO quotes (asset_id, source, source_quote_id, price, currency, quoted_at)
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (source, source_quote_id) DO UPDATE
-SET source_quote_id = EXCLUDED.source_quote_id
+SET price = EXCLUDED.price,
+    currency = EXCLUDED.currency,
+    quoted_at = EXCLUDED.quoted_at
 RETURNING id, asset_id, source, source_quote_id, price, currency, quoted_at, created_at
 `
 

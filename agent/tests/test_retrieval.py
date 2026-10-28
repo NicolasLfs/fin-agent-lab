@@ -120,6 +120,22 @@ async def test_retriever_queries_only_assets_from_deterministic_context():
                     {"ticker": "HGLG11", "type": "FII", "referencePrice": "150.00"},
                 ],
             },
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                },
+                {
+                    "rank": 2,
+                    "ticker": "HGLG11",
+                    "type": "FII",
+                    "score": "0.0500",
+                    "scoreMetric": "DIVIDEND_YIELD_TTM",
+                },
+            ],
             "assetTypes": ["STOCK", "FII"],
         }
     )

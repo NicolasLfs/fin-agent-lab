@@ -192,16 +192,44 @@ type Asset struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type AssetIndicator struct {
+	ID                  pgtype.UUID
+	AssetID             pgtype.UUID
+	Source              string
+	SourceRecordID      string
+	ObservedAt          pgtype.Timestamptz
+	PriceToEarnings     pgtype.Numeric
+	DividendYieldTtm    pgtype.Numeric
+	AnnualReferenceRate pgtype.Numeric
+	RawPayload          []byte
+	CreatedAt           pgtype.Timestamptz
+	InflationRate       pgtype.Numeric
+}
+
 type IdempotencyRecord struct {
-	ID             pgtype.UUID
-	Operation      string
-	IdempotencyKey string
-	RequestHash    string
-	Status         IdempotencyStatus
-	ReportID       pgtype.UUID
-	ResponseBody   []byte
-	CreatedAt      pgtype.Timestamptz
-	UpdatedAt      pgtype.Timestamptz
+	ID               pgtype.UUID
+	Operation        string
+	IdempotencyKey   string
+	RequestHash      string
+	Status           IdempotencyStatus
+	ReportID         pgtype.UUID
+	ResponseBody     []byte
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+	FailureStatus    pgtype.Int4
+	FailureCode      pgtype.Text
+	FailureMessage   pgtype.Text
+	FailureRetryable pgtype.Bool
+}
+
+type MarketDataSyncStatus struct {
+	AssetID      pgtype.UUID
+	DataKind     string
+	Source       string
+	AttemptedAt  pgtype.Timestamptz
+	ErrorCode    pgtype.Text
+	ErrorMessage pgtype.Text
+	Retryable    bool
 }
 
 type MarketNews struct {

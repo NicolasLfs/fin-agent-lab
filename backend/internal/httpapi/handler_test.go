@@ -73,10 +73,12 @@ func TestGenerateRecommendationsValidatesContract(t *testing.T) {
 func TestGenerateRecommendationsReturnsServiceResponse(t *testing.T) {
 	createdAt := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	want := GenerateResponse{
-		ReportID:      "report-1",
-		Status:        "COMPLETED",
-		CreatedAt:     createdAt,
-		Summary:       Summary{RankedAssets: []RankedAsset{{Rank: 1, Ticker: "VALE3", Type: "STOCK"}}},
+		ReportID:  "report-1",
+		Status:    "COMPLETED",
+		CreatedAt: createdAt,
+		Summary: Summary{RankedAssets: []RankedAsset{
+			{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+		}},
 		Justification: "Contextual explanation.",
 		CitedNewsIDs:  []string{"qdrant-id"},
 	}

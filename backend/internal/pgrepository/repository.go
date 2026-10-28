@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"fin-agent/internal/agentclient"
 	"fin-agent/internal/domain"
 	"fin-agent/internal/httpapi"
+	"fin-agent/internal/recommendation"
 	"fin-agent/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +25,7 @@ import (
 )
 
 const recommendationOperation = "recommendations.generate"
+const marketDataMaxAge = 24 * time.Hour
 
 type Repository struct {
 	pool *pgxpool.Pool
@@ -30,6 +33,136 @@ type Repository struct {
 
 func New(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
+}
+
+type recommendationPlan struct {
+	RankedAssets []httpapi.RankedAsset
+	Context      agentclient.DeterministicContext
+	QuoteIDs     []pgtype.UUID
+}
+
+func buildRecommendationPlan(
+	rows []store.ListRecommendationCandidatesRow,
+	requestedTypes []httpapi.AssetType,
+	now time.Time,
+) (recommendationPlan, error) {
+	candidates := make([]recommendation.Candidate, 0, len(rows))
+	candidateRows := make(map[string]store.ListRecommendationCandidatesRow, len(rows))
+	classCounts := make(map[httpapi.AssetType]int, len(requestedTypes))
+	classStale := make(map[httpapi.AssetType]bool, len(requestedTypes))
+	classUpstreamUnavailable := make(map[httpapi.AssetType]bool, len(requestedTypes))
+	classSyncPending := make(map[httpapi.AssetType]bool, len(requestedTypes))
+	for _, row := range rows {
+		assetType := httpapi.AssetType(row.AssetType)
+		classCounts[assetType]++
+		if !row.SyncAttemptedAt.Valid {
+			classSyncPending[assetType] = true
+		}
+		if row.SyncRetryable {
+			classUpstreamUnavailable[assetType] = true
+		}
+		candidate := recommendation.Candidate{Ticker: row.Ticker, Type: assetType}
+		switch assetType {
+		case httpapi.AssetTypeFixedIncome:
+			if row.AnnualReferenceRate == "" || !row.IndicatorObservedAt.Valid {
+				continue
+			}
+			if !isFresh(row.IndicatorObservedAt.Time, now) {
+				classStale[assetType] = true
+				continue
+			}
+			candidate.GrossAnnualRate = row.AnnualReferenceRate
+		case httpapi.AssetTypeStock, httpapi.AssetTypeFII:
+			if !row.QuoteID.Valid || !row.QuotedAt.Valid {
+				continue
+			}
+			if !isFresh(row.QuotedAt.Time, now) {
+				classStale[assetType] = true
+				continue
+			}
+			if !row.IndicatorObservedAt.Valid {
+				continue
+			}
+			if !isFresh(row.IndicatorObservedAt.Time, now) {
+				classStale[assetType] = true
+				continue
+			}
+			if assetType == httpapi.AssetTypeStock {
+				candidate.PriceToEarnings = row.PriceToEarnings
+			} else {
+				candidate.DividendYieldTTM = row.DividendYieldTtm
+			}
+		default:
+			return recommendationPlan{}, fmt.Errorf("unsupported asset type %q in market data", assetType)
+		}
+		candidates = append(candidates, candidate)
+		candidateRows[row.Ticker] = row
+	}
+
+	rankedAssets, err := recommendation.RankCandidates(candidates)
+	if err != nil {
+		return recommendationPlan{}, &httpapi.Failure{
+			Status: http.StatusBadGateway, Code: "INVALID_MARKET_DATA",
+			Message:   "Stored market indicators violate the deterministic financial data contract.",
+			Retryable: false,
+		}
+	}
+	for _, assetType := range requestedTypes {
+		if classCounts[assetType] == 0 || !hasRankedType(rankedAssets, assetType) {
+			return recommendationPlan{}, insufficientMarketData(
+				assetType, classStale[assetType], classUpstreamUnavailable[assetType], classSyncPending[assetType],
+			)
+		}
+	}
+	if len(rankedAssets) == 0 {
+		return recommendationPlan{}, insufficientMarketData(requestedTypes[0], false, false, false)
+	}
+
+	plan := recommendationPlan{
+		RankedAssets: rankedAssets,
+		Context: agentclient.DeterministicContext{
+			FixedIncomeRates: make([]agentclient.FixedIncomeRate, 0),
+			StocksAndFiis:    make([]agentclient.StockOrFII, 0, len(rankedAssets)),
+		},
+		QuoteIDs: make([]pgtype.UUID, 0, len(rankedAssets)),
+	}
+	for _, ranked := range rankedAssets {
+		row := candidateRows[ranked.Ticker]
+		if ranked.Type == httpapi.AssetTypeFixedIncome {
+			if row.IndicatorSource == "" {
+				return recommendationPlan{}, &httpapi.Failure{
+					Status: http.StatusBadGateway, Code: "INVALID_MARKET_DATA",
+					Message: "Reference-rate data has no source identifier.", Retryable: false,
+				}
+			}
+			plan.Context.FixedIncomeRates = append(plan.Context.FixedIncomeRates, agentclient.FixedIncomeRate{
+				Ticker: ranked.Ticker, Basis: "REFERENCE_INDEX", Source: row.IndicatorSource,
+				GrossRate: row.AnnualReferenceRate, NetRate: ranked.Score,
+			})
+			continue
+		}
+		price, err := domain.NewMoney(row.ReferencePrice, row.Currency)
+		if err != nil {
+			return recommendationPlan{}, &httpapi.Failure{
+				Status: http.StatusBadGateway, Code: "INVALID_MARKET_DATA",
+				Message: "Stored quote data violates the exact amount or currency contract.", Retryable: false,
+			}
+		}
+		plan.Context.StocksAndFiis = append(plan.Context.StocksAndFiis, agentclient.StockOrFII{
+			Ticker: row.Ticker, Type: string(row.AssetType), ReferencePrice: price.Amount(),
+		})
+		plan.QuoteIDs = append(plan.QuoteIDs, row.QuoteID)
+	}
+	return plan, nil
+}
+
+func hasRankedType(ranked []httpapi.RankedAsset, assetType httpapi.AssetType) bool {
+	for _, asset := range ranked {
+		if asset.Type == assetType {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Repository) Execute(
@@ -51,10 +184,7 @@ func (r *Repository) Execute(
 		return decodeStoredResponse(record.ResponseBody)
 	}
 	if record.Status == store.IdempotencyStatusFAILED {
-		return httpapi.GenerateResponse{}, &httpapi.Failure{
-			Status: http.StatusBadGateway, Code: "RECOMMENDATION_FAILED",
-			Message: "This idempotent recommendation request previously failed; submit a new key to start another request.",
-		}
+		return httpapi.GenerateResponse{}, failureFromRecord(record)
 	}
 
 	tx, err := r.pool.Begin(ctx)
@@ -63,9 +193,11 @@ func (r *Repository) Execute(
 	}
 	defer tx.Rollback(context.Background())
 	queries := store.New(tx)
-	record, err = queries.LockIdempotencyRecord(ctx, store.LockIdempotencyRecordParams{
+	lockedRecord, lockErr := queries.LockIdempotencyRecord(ctx, store.LockIdempotencyRecordParams{
 		Operation: recommendationOperation, IdempotencyKey: key,
 	})
+	err = lockErr
+	record = idempotencyRecordFromLock(lockedRecord)
 	if err != nil {
 		return httpapi.GenerateResponse{}, databaseFailure("lock idempotency record", err)
 	}
@@ -82,10 +214,7 @@ func (r *Repository) Execute(
 		if err := tx.Commit(ctx); err != nil {
 			return httpapi.GenerateResponse{}, databaseFailure("commit failed recommendation lookup", err)
 		}
-		return httpapi.GenerateResponse{}, &httpapi.Failure{
-			Status: http.StatusBadGateway, Code: "RECOMMENDATION_FAILED",
-			Message: "This idempotent recommendation request previously failed; submit a new key to start another request.",
-		}
+		return httpapi.GenerateResponse{}, failureFromRecord(record)
 	}
 	if !record.ReportID.Valid {
 		return httpapi.GenerateResponse{}, errors.New("processing idempotency record has no reportId")
@@ -101,44 +230,30 @@ func (r *Repository) Execute(
 		assetTypes = append(assetTypes, string(assetType))
 		agentAssetTypes = append(agentAssetTypes, string(assetType))
 	}
-	marketAssets, err := queries.ListAssetsForRecommendation(ctx, assetTypes)
+	marketAssets, err := queries.ListRecommendationCandidates(ctx, assetTypes)
 	if err != nil {
 		return httpapi.GenerateResponse{}, databaseFailure("load deterministic market context", err)
 	}
-	deterministicContext := agentclient.DeterministicContext{
-		FixedIncomeRates: make([]agentclient.FixedIncomeRate, 0),
-		StocksAndFiis:    make([]agentclient.StockOrFII, 0, len(marketAssets)),
-	}
-	quoteIDs := make([]pgtype.UUID, 0, len(marketAssets))
-	for _, asset := range marketAssets {
-		price, err := domain.NewMoney(asset.ReferencePrice, asset.Currency)
-		if err != nil {
-			slog.Error("stored quote violates the exact-money contract", "reportId", uuidString(record.ReportID), "ticker", asset.Ticker)
-			if failErr := failExecution(ctx, queries, record.ID, record.ReportID); failErr != nil {
-				return httpapi.GenerateResponse{}, databaseFailure("mark invalid market data as failed", failErr)
+	plan, err := buildRecommendationPlan(marketAssets, request.AssetTypes, time.Now().UTC())
+	if err != nil {
+		var failure *httpapi.Failure
+		if errors.As(err, &failure) && failure.Status == http.StatusUnprocessableEntity {
+			if failErr := failExecutionWithError(ctx, queries, record.ID, record.ReportID, failure); failErr != nil {
+				return httpapi.GenerateResponse{}, databaseFailure("mark insufficient market data as failed", failErr)
 			}
 			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return httpapi.GenerateResponse{}, databaseFailure("commit invalid market data", commitErr)
-			}
-			return httpapi.GenerateResponse{}, &httpapi.Failure{
-				Status: http.StatusBadGateway, Code: "INVALID_MARKET_DATA",
-				Message: "Stored quote data violates the exact amount or currency contract.", Retryable: false,
+				return httpapi.GenerateResponse{}, databaseFailure("commit insufficient market data response", commitErr)
 			}
 		}
-		deterministicContext.StocksAndFiis = append(deterministicContext.StocksAndFiis, agentclient.StockOrFII{
-			Ticker: asset.Ticker, Type: string(asset.AssetType), ReferencePrice: price.Amount(),
-		})
-		quoteIDs = append(quoteIDs, asset.QuoteID)
+		return httpapi.GenerateResponse{}, err
 	}
-	if len(deterministicContext.StocksAndFiis) == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return httpapi.GenerateResponse{}, databaseFailure("persist pending recommendation", err)
-		}
-		return httpapi.GenerateResponse{}, httpapi.ErrProcessing
-	}
+	rankedAssets := plan.RankedAssets
+	deterministicContext := plan.Context
+	quoteIDs := plan.QuoteIDs
 
 	runResponse, err := invoke(ctx, agentclient.RunRequest{
-		ReportID: uuidString(record.ReportID), DeterministicContext: deterministicContext, AssetTypes: agentAssetTypes,
+		ReportID: uuidString(record.ReportID), DeterministicContext: deterministicContext,
+		RankedAssets: toAgentRankedAssets(rankedAssets), AssetTypes: agentAssetTypes,
 	})
 	if err != nil {
 		logAgentFailure(record.ReportID, err)
@@ -154,17 +269,18 @@ func (r *Repository) Execute(
 		return httpapi.GenerateResponse{}, failureForAgent(err)
 	}
 
-	rankedAssets := make([]httpapi.RankedAsset, 0, len(runResponse.RankedAssets))
+	rankedResponse := make([]httpapi.RankedAsset, 0, len(runResponse.RankedAssets))
 	for _, ranked := range runResponse.RankedAssets {
-		rankedAssets = append(rankedAssets, httpapi.RankedAsset{
+		rankedResponse = append(rankedResponse, httpapi.RankedAsset{
 			Rank: ranked.Rank, Ticker: ranked.Ticker, Type: httpapi.AssetType(ranked.Type),
+			Score: ranked.Score, ScoreMetric: ranked.ScoreMetric,
 		})
 	}
 	response := httpapi.GenerateResponse{
 		ReportID:      uuidString(record.ReportID),
 		Status:        "COMPLETED",
 		CreatedAt:     report.CreatedAt.Time,
-		Summary:       httpapi.Summary{RankedAssets: rankedAssets},
+		Summary:       httpapi.Summary{RankedAssets: rankedResponse},
 		Justification: runResponse.JustificationText,
 		CitedNewsIDs:  append([]string{}, runResponse.CitedNewsIDs...),
 	}
@@ -246,13 +362,18 @@ func (r *Repository) prepareExecution(ctx context.Context, key, hash string) (st
 	}
 	defer tx.Rollback(context.Background())
 	queries := store.New(tx)
-	record, err := queries.CreateIdempotencyRecord(ctx, store.CreateIdempotencyRecordParams{
+	createdRecord, err := queries.CreateIdempotencyRecord(ctx, store.CreateIdempotencyRecordParams{
 		Operation: recommendationOperation, IdempotencyKey: key, RequestHash: hash,
 	})
+	var record store.IdempotencyRecord
 	if errors.Is(err, pgx.ErrNoRows) {
-		record, err = queries.LockIdempotencyRecord(ctx, store.LockIdempotencyRecordParams{
+		lockedRecord, lockErr := queries.LockIdempotencyRecord(ctx, store.LockIdempotencyRecordParams{
 			Operation: recommendationOperation, IdempotencyKey: key,
 		})
+		err = lockErr
+		record = idempotencyRecordFromLock(lockedRecord)
+	} else if err == nil {
+		record = idempotencyRecordFromCreate(createdRecord)
 	}
 	if err != nil {
 		return store.IdempotencyRecord{}, databaseFailure("create or lock idempotency record", err)
@@ -295,6 +416,35 @@ func requestHash(request httpapi.GenerateRequest) (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
+func idempotencyRecordFromCreate(record store.CreateIdempotencyRecordRow) store.IdempotencyRecord {
+	return store.IdempotencyRecord{
+		ID: record.ID, Operation: record.Operation, IdempotencyKey: record.IdempotencyKey,
+		RequestHash: record.RequestHash, Status: record.Status, ReportID: record.ReportID,
+		ResponseBody: record.ResponseBody, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+	}
+}
+
+func idempotencyRecordFromLock(record store.LockIdempotencyRecordRow) store.IdempotencyRecord {
+	return store.IdempotencyRecord{
+		ID: record.ID, Operation: record.Operation, IdempotencyKey: record.IdempotencyKey,
+		RequestHash: record.RequestHash, Status: record.Status, ReportID: record.ReportID,
+		ResponseBody: record.ResponseBody, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		FailureStatus: record.FailureStatus, FailureCode: record.FailureCode,
+		FailureMessage: record.FailureMessage, FailureRetryable: record.FailureRetryable,
+	}
+}
+
+func toAgentRankedAssets(ranked []httpapi.RankedAsset) []agentclient.RankedAsset {
+	converted := make([]agentclient.RankedAsset, len(ranked))
+	for index, asset := range ranked {
+		converted[index] = agentclient.RankedAsset{
+			Rank: asset.Rank, Ticker: asset.Ticker, Type: string(asset.Type),
+			Score: asset.Score, ScoreMetric: asset.ScoreMetric,
+		}
+	}
+	return converted
+}
+
 func decodeStoredResponse(body []byte) (httpapi.GenerateResponse, error) {
 	var response httpapi.GenerateResponse
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -322,6 +472,97 @@ func failExecution(ctx context.Context, queries *store.Queries, id, reportID pgt
 		return errors.New("idempotency record was not in PROCESSING state")
 	}
 	return nil
+}
+
+func failExecutionWithError(
+	ctx context.Context,
+	queries *store.Queries,
+	id, reportID pgtype.UUID,
+	failure *httpapi.Failure,
+) error {
+	reportRows, err := queries.FailRecommendationReport(ctx, reportID)
+	if err != nil {
+		return err
+	}
+	if reportRows != 1 {
+		return errors.New("recommendation report was not in PROCESSING state")
+	}
+	idempotencyRows, err := queries.FailIdempotencyRecordWithError(ctx, store.FailIdempotencyRecordWithErrorParams{
+		ID: id,
+		FailureStatus: pgtype.Int4{
+			Int32: int32(failure.Status), Valid: true,
+		},
+		FailureCode: pgtype.Text{
+			String: failure.Code, Valid: true,
+		},
+		FailureMessage: pgtype.Text{
+			String: failure.Message, Valid: true,
+		},
+		FailureRetryable: pgtype.Bool{
+			Bool: failure.Retryable, Valid: true,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if idempotencyRows != 1 {
+		return errors.New("idempotency record was not in PROCESSING state")
+	}
+	return nil
+}
+
+func insufficientMarketData(
+	assetType httpapi.AssetType,
+	stale, upstreamUnavailable, syncPending bool,
+) *httpapi.Failure {
+	if upstreamUnavailable {
+		return &httpapi.Failure{
+			Status: http.StatusServiceUnavailable, Code: "MARKET_DATA_UPSTREAM_UNAVAILABLE",
+			Message:   fmt.Sprintf("Market data synchronization for requested asset type %s failed temporarily; retry with the same Idempotency-Key.", assetType),
+			Retryable: true,
+		}
+	}
+	if stale {
+		return &httpapi.Failure{
+			Status: http.StatusServiceUnavailable, Code: "MARKET_DATA_STALE",
+			Message:   fmt.Sprintf("Market data for requested asset type %s is older than 24 hours; retry with the same Idempotency-Key after synchronization.", assetType),
+			Retryable: true,
+		}
+	}
+	if syncPending {
+		return &httpapi.Failure{
+			Status: http.StatusServiceUnavailable, Code: "MARKET_DATA_SYNC_PENDING",
+			Message:   fmt.Sprintf("Market data for requested asset type %s has not been synchronized yet; retry with the same Idempotency-Key.", assetType),
+			Retryable: true,
+		}
+	}
+	return &httpapi.Failure{
+		Status: http.StatusUnprocessableEntity, Code: "MARKET_DATA_INSUFFICIENT",
+		Message:   fmt.Sprintf("No valid ranking data is available for requested asset type %s.", assetType),
+		Retryable: false,
+	}
+}
+
+func isFresh(observedAt, now time.Time) bool {
+	if observedAt.After(now) {
+		return observedAt.Sub(now) <= 5*time.Minute
+	}
+	age := now.Sub(observedAt)
+	return age >= 0 && age <= marketDataMaxAge
+}
+
+func failureFromRecord(record store.IdempotencyRecord) *httpapi.Failure {
+	if record.FailureStatus.Valid && record.FailureCode.Valid &&
+		record.FailureMessage.Valid && record.FailureRetryable.Valid {
+		return &httpapi.Failure{
+			Status: int(record.FailureStatus.Int32), Code: record.FailureCode.String,
+			Message: record.FailureMessage.String, Retryable: record.FailureRetryable.Bool,
+		}
+	}
+	return &httpapi.Failure{
+		Status: http.StatusBadGateway, Code: "RECOMMENDATION_FAILED",
+		Message: "This idempotent recommendation request previously failed; submit a new key to start another request.",
+	}
 }
 
 func shouldKeepProcessing(err error) bool {

@@ -23,13 +23,16 @@ func TestRunPostsContractAndDecodesResponse(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		if payload.ReportID != "report-1" || len(payload.DeterministicContext.StocksAndFiis) != 1 ||
-			payload.DeterministicContext.StocksAndFiis[0].ReferencePrice != "68.50" {
+			payload.DeterministicContext.StocksAndFiis[0].ReferencePrice != "68.50" ||
+			len(payload.RankedAssets) != 1 || payload.RankedAssets[0].Score != "0.1000" {
 			t.Errorf("request payload = %#v", payload)
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(RunResponse{
-			Status:            "COMPLETED",
-			RankedAssets:      []RankedAsset{{Rank: 1, Ticker: "VALE3", Type: "STOCK"}},
+			Status: "COMPLETED",
+			RankedAssets: []RankedAsset{
+				{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+			},
 			JustificationText: "Grounded explanation.",
 			CitedNewsIDs:      []string{"point-1"},
 		})
@@ -44,6 +47,9 @@ func TestRunPostsContractAndDecodesResponse(t *testing.T) {
 		ReportID: "report-1",
 		DeterministicContext: DeterministicContext{
 			StocksAndFiis: []StockOrFII{{Ticker: "VALE3", Type: "STOCK", ReferencePrice: "68.50"}},
+		},
+		RankedAssets: []RankedAsset{
+			{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
 		},
 		AssetTypes: []string{"STOCK"},
 	})

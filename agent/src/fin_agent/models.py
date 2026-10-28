@@ -29,6 +29,9 @@ class ContractModel(BaseModel):
 
 class FixedIncomeRate(ContractModel):
     ticker: StrictStr
+    basis: Literal["REFERENCE_INDEX"]
+    source: StrictStr = Field(min_length=1, max_length=128)
+    gross_rate: StrictStr = Field(alias="grossRate", min_length=1, max_length=64)
     net_rate: StrictStr = Field(alias="netRate", min_length=1, max_length=64)
 
     @field_validator("ticker")
@@ -41,6 +44,11 @@ class FixedIncomeRate(ContractModel):
     @field_validator("net_rate")
     @classmethod
     def validate_net_rate(cls, value: str) -> str:
+        return _validate_decimal_string(value)
+
+    @field_validator("gross_rate")
+    @classmethod
+    def validate_gross_rate(cls, value: str) -> str:
         return _validate_decimal_string(value)
 
 
@@ -70,6 +78,7 @@ class DeterministicContext(ContractModel):
 class RunRequest(ContractModel):
     report_id: UUID = Field(alias="reportId")
     deterministic_context: DeterministicContext = Field(alias="deterministicContext")
+    ranked_assets: list["RankedAsset"] = Field(alias="rankedAssets", min_length=1, max_length=500)
     asset_types: list[AssetType] = Field(alias="assetTypes", min_length=1, max_length=3)
 
     @model_validator(mode="after")
@@ -90,6 +99,21 @@ class RunRequest(ContractModel):
             raise ValueError("deterministic context contains an asset type not requested in assetTypes")
         if any(item.type not in requested for item in self.deterministic_context.stocks_and_fiis):
             raise ValueError("deterministic context contains an asset type not requested in assetTypes")
+        allowed_types = {
+            rate.ticker: "FIXED_INCOME"
+            for rate in self.deterministic_context.fixed_income_rates
+        }
+        allowed_types.update({
+            item.ticker: item.type for item in self.deterministic_context.stocks_and_fiis
+        })
+        if [asset.rank for asset in self.ranked_assets] != list(range(1, len(self.ranked_assets) + 1)):
+            raise ValueError("rankedAssets must have contiguous ranks starting at 1")
+        ranked_tickers = [asset.ticker for asset in self.ranked_assets]
+        if len(ranked_tickers) != len(set(ranked_tickers)):
+            raise ValueError("rankedAssets contains duplicate tickers")
+        for asset in self.ranked_assets:
+            if allowed_types.get(asset.ticker) != asset.type:
+                raise ValueError("rankedAssets must contain only assets from deterministicContext")
         return self
 
 
@@ -97,6 +121,12 @@ class RankedAsset(ContractModel):
     rank: int = Field(ge=1)
     ticker: StrictStr = Field(min_length=1, max_length=32)
     type: AssetType
+    score: StrictStr
+    score_metric: Literal[
+        "EARNINGS_YIELD",
+        "DIVIDEND_YIELD_TTM",
+        "REFERENCE_INDEX_NET_RATE",
+    ] = Field(alias="scoreMetric")
 
     @field_validator("ticker")
     @classmethod
@@ -104,6 +134,24 @@ class RankedAsset(ContractModel):
         if not _TICKER.fullmatch(value):
             raise ValueError("ticker has an invalid format")
         return value
+
+    @field_validator("score")
+    @classmethod
+    def validate_score(cls, value: str) -> str:
+        if Decimal(_validate_decimal_string(value)) < 0:
+            raise ValueError("score must be nonnegative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_metric_type(self) -> "RankedAsset":
+        expected = {
+            "STOCK": "EARNINGS_YIELD",
+            "FII": "DIVIDEND_YIELD_TTM",
+            "FIXED_INCOME": "REFERENCE_INDEX_NET_RATE",
+        }[self.type]
+        if self.score_metric != expected:
+            raise ValueError("scoreMetric does not match the ranked asset type")
+        return self
 
 
 class RunResponse(ContractModel):

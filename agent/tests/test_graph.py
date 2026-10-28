@@ -14,9 +14,28 @@ async def test_graph_runs_retrieval_risk_and_formatting_with_report_id_thread():
             "reportId": "0192f298-345e-7e38-af88-e43f851a819d",
             "deterministicContext": {
                 "fixedIncomeRates": [],
-                "stocksAndFiis": [{"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"}],
+                "stocksAndFiis": [
+                    {"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"},
+                    {"ticker": "HGLG11", "type": "FII", "referencePrice": "150.00"},
+                ],
             },
-            "assetTypes": ["STOCK"],
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "HGLG11",
+                    "type": "FII",
+                    "score": "0.1200",
+                    "scoreMetric": "DIVIDEND_YIELD_TTM",
+                },
+                {
+                    "rank": 2,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                }
+            ],
+            "assetTypes": ["STOCK", "FII"],
         }
     )
     calls = []
@@ -39,7 +58,7 @@ async def test_graph_runs_retrieval_risk_and_formatting_with_report_id_thread():
         async def analyze(self, _request, news):
             calls.append(("analyze", [item["id"] for item in news]))
             return RiskAnalysis(
-                rankedTickers=["VALE3"],
+                riskTickers=["VALE3"],
                 justificationText="The retrieved report describes an investigation.",
                 citedNewsIds=["qdrant-point-exact"],
             )
@@ -53,7 +72,22 @@ async def test_graph_runs_retrieval_risk_and_formatting_with_report_id_thread():
     assert calls == ["retrieve", ("analyze", ["qdrant-point-exact"])]
     assert result["response"] == {
         "status": "COMPLETED",
-        "rankedAssets": [{"rank": 1, "ticker": "VALE3", "type": "STOCK"}],
+        "rankedAssets": [
+            {
+                "rank": 1,
+                "ticker": "HGLG11",
+                "type": "FII",
+                "score": "0.1200",
+                "scoreMetric": "DIVIDEND_YIELD_TTM",
+            },
+            {
+                "rank": 2,
+                "ticker": "VALE3",
+                "type": "STOCK",
+                "score": "0.1000",
+                "scoreMetric": "EARNINGS_YIELD",
+            }
+        ],
         "justificationText": "The retrieved report describes an investigation.",
         "citedNewsIds": ["qdrant-point-exact"],
     }
@@ -68,6 +102,15 @@ async def test_graph_rejects_llm_citation_not_returned_by_qdrant():
                 "fixedIncomeRates": [],
                 "stocksAndFiis": [{"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"}],
             },
+            "rankedAssets": [
+                {
+                    "rank": 1,
+                    "ticker": "VALE3",
+                    "type": "STOCK",
+                    "score": "0.1000",
+                    "scoreMetric": "EARNINGS_YIELD",
+                }
+            ],
             "assetTypes": ["STOCK"],
         }
     )
@@ -79,7 +122,7 @@ async def test_graph_rejects_llm_citation_not_returned_by_qdrant():
     class Analyzer:
         async def analyze(self, _request, _news):
             return RiskAnalysis(
-                rankedTickers=["VALE3"],
+                riskTickers=["VALE3"],
                 justificationText="Grounded text.",
                 citedNewsIds=["fabricated-id"],
             )

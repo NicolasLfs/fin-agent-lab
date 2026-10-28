@@ -83,8 +83,11 @@ O Go envia o contexto financeiro já calculado deterministicamente. Valores deci
   "deterministicContext": {
     "fixedIncomeRates": [
       {
-        "ticker": "TESOURO_IPCA_2029",
-        "netRate": "0.0650"
+        "ticker": "SELIC_SGS_432",
+        "basis": "REFERENCE_INDEX",
+        "source": "BCB_SGS:432",
+        "grossRate": "0.1375",
+        "netRate": "0.1190"
       }
     ],
     "stocksAndFiis": [
@@ -95,9 +98,31 @@ O Go envia o contexto financeiro já calculado deterministicamente. Valores deci
       }
     ]
   },
+  "rankedAssets": [
+    {
+      "rank": 1,
+      "ticker": "SELIC_SGS_432",
+      "type": "FIXED_INCOME",
+      "score": "0.1190",
+      "scoreMetric": "REFERENCE_INDEX_NET_RATE"
+    },
+    {
+      "rank": 2,
+      "ticker": "VALE3",
+      "type": "STOCK",
+      "score": "0.1000",
+      "scoreMetric": "EARNINGS_YIELD"
+    }
+  ],
   "assetTypes": ["FIXED_INCOME", "STOCK", "FII"]
 }
 ```
+
+`rankedAssets` is ordered and calculated by Go. `score` is a decimal string
+(annual fraction, four decimal places), and `scoreMetric` labels its meaning.
+Python must return the same entries and order unchanged; it may provide
+grounded risk analysis and justification but cannot rank, reorder, remove, or
+add assets.
 
 O endpoint recebe `Content-Type: application/json`.
 
@@ -109,9 +134,20 @@ Em caso de conclusão, retornar HTTP `200 OK` e `Content-Type: application/json`
 {
   "status": "COMPLETED",
   "rankedAssets": [
-    { "rank": 1, "ticker": "TESOURO_IPCA_2029", "type": "FIXED_INCOME" },
-    { "rank": 2, "ticker": "VALE3", "type": "STOCK" },
-    { "rank": 3, "ticker": "HGLG11", "type": "FII" }
+    {
+      "rank": 1,
+      "ticker": "SELIC_SGS_432",
+      "type": "FIXED_INCOME",
+      "score": "0.1190",
+      "scoreMetric": "REFERENCE_INDEX_NET_RATE"
+    },
+    {
+      "rank": 2,
+      "ticker": "VALE3",
+      "type": "STOCK",
+      "score": "0.1000",
+      "scoreMetric": "EARNINGS_YIELD"
+    }
   ],
   "justificationText": "O ranking priorizou Renda Fixa...",
   "citedNewsIds": ["qdrant-uuid-1", "qdrant-uuid-2"]
@@ -137,10 +173,10 @@ Erros usam um envelope JSON padronizado, simplificado a partir de RFC 7807 Probl
 | HTTP status | Uso | Tratamento no Go |
 | --- | --- | --- |
 | `400 Bad Request` | JSON malformado ou campos obrigatórios ausentes no request do Go. | Tratar como erro de contrato; não repetir sem corrigir o request. |
-| `422 Unprocessable Entity` | Falha de validação dos dados processados pelas tools do agente. | Registrar a falha de validação e não repetir automaticamente o mesmo payload. |
+| `422 Unprocessable Entity` | Falha de validação das tools ou ausência estrutural de dados para algum tipo solicitado. | Erro não retryable; persistir o envelope para que a mesma chave idempotente reproduza a falha. |
 | `429 Too Many Requests` | Cota do provedor de IA esgotada. O agente tenta primeiro as rotas de contingência configuradas no OpenRouter; retornar esse status ao Go quando não houver rota disponível. | Aplicar retry/backoff ou deixar o relatório pendente para reprocessamento, conforme `retryable` e a política de idempotência. |
 | `502 Bad Gateway` | Falha temporária ao acessar o Qdrant ou outra dependência upstream. | Considerar temporário e permitir reprocessamento controlado. |
-| `503 Service Unavailable` | Serviço Python ou dependência necessária indisponível temporariamente. | Marcar a execução como pendente ou falha recuperável para reprocessamento. |
+| `503 Service Unavailable` | Serviço Python/dependência indisponível ou cotação, taxa ou fundamento acima do limite de 24 horas. | Falha retryable; manter o relatório pendente e permitir nova tentativa com a mesma chave. |
 
 O Go deve também tratar timeout e erros de transporte como falhas potencialmente transitórias. Para evitar execução duplicada quando a resposta se perde depois de o agente iniciar ou concluir, usar o mesmo `reportId` para correlacionar e retomar a execução; não gerar um novo identificador em retries do mesmo pedido.
 
@@ -173,15 +209,58 @@ dependências; a readiness verifica PostgreSQL, `GET <QDRANT_URL>/healthz` e
 `GET <LOCALSTACK_URL>/_localstack/health`, exigindo estado SQS `available` ou
 `running`.
 
-O schema atual não armazena taxas brutas e prazos de renda fixa nem indicadores
-fundamentalistas de ações/FIIs. Assim, nesta etapa o backend encaminha preços
-de referência exatos das cotações mais recentes disponíveis para ações/FIIs,
-sem inferir rentabilidade nem usar preço isolado como métrica de ranking.
-`fixedIncomeRates` permanece vazio até existir uma fonte explícita de taxa e
-prazo; ativos sem os dados necessários não são inventados nem classificados.
-O contexto financeiro é ordenado deterministicamente por ticker e a resposta
-do agente só pode classificar ativos presentes nesse contexto, com ranks
-contíguos e IDs de notícias auditáveis.
+#### Cálculo financeiro e ranking determinístico
+
+- `asset_indicators` armazena snapshots de indicadores com fonte, identificador
+  idempotente, horário de coleta, valores numéricos e `raw_payload` JSONB para
+  auditoria. As fontes normalizam P/L como múltiplo e DY/taxa como fração anual
+  (por exemplo, `6,50%` vira `"0.0650"`). O payload conserva a observação
+  original e seu timestamp da fonte.
+- A primeira versão de renda fixa usa somente taxas de referência do SGS/BCB,
+  incluindo a série Selic 432 quando o adaptador confirmar a unidade e a
+  normalizar como taxa anual bruta. O item é identificado como referência (por
+  exemplo, `SELIC_SGS_432`, `basis: "REFERENCE_INDEX"`), não como título ou
+  rentabilidade garantida. O ranking aplica a referência a um horizonte
+  hipotético fixo de 1.095 dias, IR de 15% sobre o rendimento acumulado (faixa
+  acima de 720 dias) e anualiza novamente o rendimento líquido. Como índice
+  não é produto investível, o valor líquido é um proxy comparativo; não há taxa
+  de custódia nessa referência. Tesouro IPCA+ fica adiado até confirmar uma
+  fonte diária por título, taxa e vencimento reais.
+- Para ações, o score é `E/P = 1/(P/L)` somente quando `P/L > 0`. Para FIIs,
+  usa-se o DY dos últimos 12 meses. Go compara esses valores e a taxa líquida
+  de referência como frações anuais, em ordem decrescente; empate matemático
+  exato é desempatatado pelo ticker em ordem alfabética. É um proxy
+  determinístico, não uma classificação ajustada por risco. Preço unitário não
+  compõe o score.
+- Go calcula os scores com `math/big` e aritmética racional, arredondando
+  apenas na serialização para quatro casas decimais. `rankedAssets` leva a
+  ordenação ao agente, que não pode alterar scores ou posições.
+- Dados estruturais ausentes para qualquer classe solicitada resultam em `422`
+  não retryable; snapshots vencidos ou dados de sincronização temporariamente
+  indisponíveis resultam em `503` retryable. Não há ranking parcial entre
+  classes solicitadas. Ativos sem métrica individual válida são excluídos; se
+  uma classe ficar sem nenhum ativo rankeável, a requisição inteira falha.
+- O limite de atualidade para cotações, taxas e fundamentos é de 24 horas.
+  Ativos sem fundamentos não são pontuados e não têm uma fonte alternativa
+  silenciosa.
+- O worker `backend/cmd/market-worker` coleta imediatamente na inicialização e
+  repete conforme `MARKET_DATA_SYNC_INTERVAL` (15 minutos por padrão). Ele
+  persiste a última tentativa por ativo e tipo de dado em
+  `market_data_sync_status`; falha transitória do provedor vira `503` retryable
+  na API, enquanto ausência estrutural ou restrição permanente do plano não
+  vira retry infinito e resulta em `422`.
+- SGS/BCB série 432 fornece taxa Selic anual de referência e série 433 fornece
+  IPCA mensal. Percentuais do SGS são normalizados por divisão decimal exata
+  por 100. O IPCA mensal é salvo em `inflation_rate` para contexto/auditoria,
+  sem score ou ranking. `observed_at` registra o instante de coleta, e o
+  `raw_payload` conserva a data e o valor oficiais da série.
+- A Brapi é a fonte de cotações e fundamentos: `/api/v2/stocks/quote` mais
+  `/api/v2/stocks/statistics?mode=current` fornecem preço e `trailingPE`;
+  `/api/v2/fii/indicators` fornece `price` e `dividendYield12m`. O preço de
+  cotação usa `regularMarketTime`; DY TTM é mantido na unidade de fração
+  fornecida pela API. `BRAPI_API_KEY` é opcional para tickers de demonstração,
+  mas os limites de cobertura variam por plano; o worker não troca de fonte
+  silenciosamente. Tokens são enviados como `Authorization: Bearer ...`.
 
 ### Orquestração do agente e estado
 
@@ -201,10 +280,11 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 - Constraints do banco são parte da garantia de deduplicação e idempotência, não apenas validações em memória.
 - Cálculos e dados monetários não usam `float32` ou `float64`.
 - Relatórios guardam os identificadores exatos das cotações no PostgreSQL e das notícias no Qdrant que sustentam a recomendação.
+- `asset_indicators` guarda snapshots de P/L, DY TTM ou taxa de referência, com source, `observed_at`, identificador de origem e payload bruto; o `source_record_id` torna cada ingestão idempotente.
 - Qdrant guarda os embeddings e seus metadados estruturados; o banco relacional preserva os dados necessários à auditoria do pipeline.
 - `Money` representa unidades mínimas em `int64`, valida códigos ISO 4217 e expõe JSON com `amount` string e `currency`.
-- A migration `000001_persistence_domain` define ativos, cotações, notícias, relatórios, vínculos de auditoria e registros de idempotência; cada migration tem arquivo de subida e reversão.
-- `sqlc` gera o acesso tipado em `backend/internal/store` a partir de `backend/db/schema.sql` e `backend/db/query.sql`. O schema SQL e a migration inicial devem permanecer equivalentes.
+- As migrations `000001_persistence_domain`, `000002_deterministic_market_indicators` e `000003_market_data_sync_status` definem o domínio, os indicadores auditáveis, o IPCA mensal e o status de sincronização; cada migration tem arquivo de subida e reversão.
+- `sqlc` gera o acesso tipado em `backend/internal/store` a partir de `backend/db/schema.sql` e `backend/db/query.sql`. O schema SQL deve equivaler à aplicação ordenada de todas as migrations.
 - O worker seleciona notícias pendentes com `FOR UPDATE SKIP LOCKED` dentro de uma transação. A execução de recomendação deve bloquear o registro de idempotência com `FOR UPDATE` e gravar relatório, vínculos de auditoria e resposta idempotente na mesma transação.
 
 ## Decisões registradas
@@ -224,6 +304,11 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 | API HTTP | Biblioteca padrão Go `net/http`. |
 | Comunicação síncrona Go–Python | HTTP/REST com JSON; cliente Go com `net/http` e serviço Python com FastAPI. |
 | Contrato de execução do agente | `POST /internal/agent/run`; request contém `reportId`, `deterministicContext` e `assetTypes`; response contém status, ativos ranqueados, justificativa e IDs das notícias citadas. |
+| Cálculos e ranking | Go calcula taxa líquida de referência, E/P e DY TTM sem floats; ordena scores anuais decrescentes com desempate por ticker. Python recebe `rankedAssets` e não altera posições ou scores. |
+| Dados de mercado para ranking | SGS/BCB série 432 serve apenas como taxa de referência; Brapi fornece cotações, P/L e DY TTM. O worker consulta os endpoints oficiais documentados e registra falhas de plano/disponibilidade. |
+| IPCA macroeconômico | SGS/BCB série 433 é persistido como variação mensal em `inflation_rate`, para referência e auditoria; não entra no ranking. |
+| Worker de mercado | Executável separado `backend/cmd/market-worker`, sincronização imediata e intervalo configurável por `MARKET_DATA_SYNC_INTERVAL` (padrão 15 min). Em desenvolvimento local, o executável carrega o `.env` da raiz se encontrado; variáveis do processo têm precedência. `BRAPI_API_KEY` não deve ser versionada. |
+| Renda fixa pública | Horizonte comparativo fixo de 1.095 dias e IR de 15% sobre o rendimento acumulado; Tesouro IPCA+ fica adiado até confirmar endpoint/arquivo diário por título. |
 | Erros e timeouts Go–Python | Envelope JSON padronizado com `code`, `message` e `retryable`; status HTTP `400`, `422`, `429`, `502` e `503`; dial timeout de 3 s e timeout total de 40 s. |
 | Pedido ainda em processamento | Responder `503` retryable e orientar repetição com a mesma `Idempotency-Key`; retomar o mesmo `reportId`, sem endpoint de consulta nesta etapa. |
 | Readiness Go | Verificar PostgreSQL, `GET /healthz` do Qdrant e estado SQS do endpoint de saúde do LocalStack. |
@@ -240,17 +325,17 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 - **LLM:** OpenRouter será usado para análise de risco e geração de justificativas, priorizando modelos acessíveis pelo tier gratuito.
 - **Rotas de contingência:** `OPENROUTER_MODELS` contém a rota primária e as contingências, separadas por vírgula e na ordem de tentativa. Configure a rota gratuita primeiro quando disponível. Rate limit, timeout, indisponibilidade e saída inválida acionam a próxima rota; se todas as rotas retornarem limite, responder `429`, e se falharem por outras causas, `503`.
 - **Configuração:** credenciais, identificadores de modelos e parâmetros das rotas devem ser configuráveis por ambiente, sem segredos no código.
+- **Configuração local:** o arquivo `.env` não versionado na raiz pode fornecer as variáveis de desenvolvimento ao Compose, aos executáveis Go e ao agente Python; em containers, credenciais são injetadas no runtime e nunca copiadas para as imagens.
 - **Checkpointer:** usar `AsyncPostgresSaver` e executar `setup()` na inicialização; o mesmo `reportId` é enviado como `thread_id` em toda tentativa, para recuperar o checkpoint após falhas.
 
 ## Decisões pendentes
 
 As escolhas abaixo ainda não estão determinadas pelos requisitos e devem ser registradas aqui quando forem tomadas:
 
-- Fontes concretas de cotações e respectivas regras de atualização.
 - Tipo de fila SQS, valores de visibility timeout, política de retries e quantidade máxima de recebimentos antes da DLQ.
 - Recursos AWS simulados que serão provisionados além do SQS.
-- Fonte, escala, prazo e regra tributária necessários para calcular taxas líquidas de renda fixa.
-- Métricas fundamentais e fórmula determinística de ranking para ações e FIIs.
+- Endpoint/arquivo diário oficial do Tesouro Direto e seu mapeamento de taxa e vencimento por título.
+- Plano Brapi necessário para cobrir todo o catálogo de FIIs e a frequência máxima de coleta que respeite sua cota.
 
 ## Execução local e infraestrutura
 

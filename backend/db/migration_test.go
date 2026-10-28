@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,29 +14,43 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const migrationPath = "migrations/000001_persistence_domain.up.sql"
+var migrationPaths = []string{
+	"migrations/000001_persistence_domain.up.sql",
+	"migrations/000002_deterministic_market_indicators.up.sql",
+	"migrations/000003_market_data_sync_status.up.sql",
+}
 
 func TestPostgres18PersistenceMigration(t *testing.T) {
-	migration, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Fatalf("read migration %s: %v", migrationPath, err)
-	}
-	if len(strings.TrimSpace(string(migration))) == 0 {
-		t.Fatalf("migration %s is empty", migrationPath)
+	var migrations []string
+	for _, path := range migrationPaths {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", path, err)
+		}
+		if len(strings.TrimSpace(string(migration))) == 0 {
+			t.Fatalf("migration %s is empty", path)
+		}
+		migrations = append(migrations, string(migration))
 	}
 	schema, err := os.ReadFile("schema.sql")
 	if err != nil {
 		t.Fatalf("read sqlc schema: %v", err)
 	}
-	if strings.TrimSpace(string(schema)) != strings.TrimSpace(string(migration)) {
-		t.Fatal("sqlc schema and initial migration differ")
+	if strings.TrimSpace(string(schema)) != strings.TrimSpace(strings.Join(migrations, "\n")) {
+		t.Fatal("sqlc schema and ordered migrations differ")
 	}
-	downMigration, err := os.ReadFile(filepath.Join("migrations", "000001_persistence_domain.down.sql"))
-	if err != nil {
-		t.Fatalf("read down migration: %v", err)
-	}
-	if len(strings.TrimSpace(string(downMigration))) == 0 {
-		t.Fatal("down migration is empty")
+	for _, path := range []string{
+		"migrations/000001_persistence_domain.down.sql",
+		"migrations/000002_deterministic_market_indicators.down.sql",
+		"migrations/000003_market_data_sync_status.down.sql",
+	} {
+		downMigration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read down migration %s: %v", path, err)
+		}
+		if len(strings.TrimSpace(string(downMigration))) == 0 {
+			t.Fatalf("down migration %s is empty", path)
+		}
 	}
 
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
@@ -88,8 +101,10 @@ func TestPostgres18PersistenceMigration(t *testing.T) {
 	}
 	defer testConn.Close(context.Background())
 
-	if _, err := testConn.Exec(ctx, string(migration)); err != nil {
-		t.Fatalf("apply persistence migration: %v", err)
+	for index, migration := range migrations {
+		if _, err := testConn.Exec(ctx, migration); err != nil {
+			t.Fatalf("apply migration %s: %v", migrationPaths[index], err)
+		}
 	}
 
 	var assetID pgtype.UUID
@@ -111,6 +126,60 @@ func TestPostgres18PersistenceMigration(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert valid quote: %v", err)
 	}
+	if _, err := testConn.Exec(ctx,
+		`INSERT INTO asset_indicators (
+			asset_id, source, source_record_id, observed_at, price_to_earnings, inflation_rate, raw_payload
+		) VALUES ($1, 'Brapi', 'metric-1', now(), 10, 0.0082, '{"priceToEarnings":10,"ipcaMonthly":0.82}')`,
+		assetID,
+	); err != nil {
+		t.Fatalf("insert valid asset indicator: %v", err)
+	}
+	var persistedInflation string
+	if err := testConn.QueryRow(ctx,
+		"SELECT inflation_rate::text FROM asset_indicators WHERE source = 'Brapi' AND source_record_id = 'metric-1'",
+	).Scan(&persistedInflation); err != nil {
+		t.Fatalf("read persisted inflation rate: %v", err)
+	}
+	if persistedInflation != "0.0082" {
+		t.Fatalf("persisted monthly inflation rate = %q, want 0.0082", persistedInflation)
+	}
+	var ipcaAssetID pgtype.UUID
+	if err := testConn.QueryRow(ctx,
+		"INSERT INTO assets (ticker, asset_type, name) VALUES ('IPCA_SGS_433', 'FIXED_INCOME', 'Monthly IPCA reference') RETURNING id",
+	).Scan(&ipcaAssetID); err != nil {
+		t.Fatalf("insert IPCA reference asset: %v", err)
+	}
+	if _, err := testConn.Exec(ctx,
+		`INSERT INTO asset_indicators (
+			asset_id, source, source_record_id, observed_at, inflation_rate, raw_payload
+		) VALUES ($1, 'BCB_SGS:433', '433:2026-09-28', now(), 0.0082, '{"data":"28/09/2026","valor":"0.82"}')`,
+		ipcaAssetID,
+	); err != nil {
+		t.Fatalf("insert inflation-only reference indicator: %v", err)
+	}
+	if _, err := testConn.Exec(ctx,
+		`INSERT INTO market_data_sync_status (
+			asset_id, data_kind, source, attempted_at, error_code, error_message, retryable
+		) VALUES ($1, 'FUNDAMENTALS', 'BRAPI', now(), 'MARKET_DATA_UPSTREAM_UNAVAILABLE', 'upstream unavailable', true)`,
+		assetID,
+	); err != nil {
+		t.Fatalf("persist retryable market-data synchronization status: %v", err)
+	}
+	assertStatementFails(t, ctx, testConn,
+		`INSERT INTO asset_indicators (
+			asset_id, source, source_record_id, observed_at, dividend_yield_ttm, raw_payload
+		) VALUES ($1, 'Brapi', 'metric-1', now(), 0.05, '{"dividendYield":0.05}')`,
+		"duplicate asset indicator source record", assetID)
+	assertStatementFails(t, ctx, testConn,
+		`INSERT INTO asset_indicators (
+			asset_id, source, source_record_id, observed_at, dividend_yield_ttm, raw_payload
+		) VALUES ($1, 'Brapi', 'metric-negative', now(), -0.05, '{"dividendYield":-0.05}')`,
+		"negative dividend yield", assetID)
+	assertStatementFails(t, ctx, testConn,
+		`INSERT INTO asset_indicators (
+			asset_id, source, source_record_id, observed_at, raw_payload
+		) VALUES ($1, 'Brapi', 'metric-empty', now(), '{}')`,
+		"asset indicator without metrics", assetID)
 	assertStatementFails(t, ctx, testConn,
 		"INSERT INTO quotes (asset_id, source, source_quote_id, price, currency, quoted_at) VALUES ($1, 'test', 'quote-1', 1.01, 'BRL', now())",
 		"duplicate source quote", assetID)
@@ -218,8 +287,18 @@ func TestPostgres18PersistenceMigration(t *testing.T) {
 		"INSERT INTO recommendation_reports (status) VALUES ('UNKNOWN')",
 		"unknown report status")
 
-	if _, err := testConn.Exec(ctx, string(downMigration)); err != nil {
-		t.Fatalf("apply persistence down migration: %v", err)
+	for _, path := range []string{
+		"migrations/000003_market_data_sync_status.down.sql",
+		"migrations/000002_deterministic_market_indicators.down.sql",
+		"migrations/000001_persistence_domain.down.sql",
+	} {
+		downMigration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read down migration %s: %v", path, err)
+		}
+		if _, err := testConn.Exec(ctx, string(downMigration)); err != nil {
+			t.Fatalf("apply down migration %s: %v", path, err)
+		}
 	}
 	var assetsTableRemoved bool
 	if err := testConn.QueryRow(ctx, "SELECT to_regclass('assets') IS NULL").Scan(&assetsTableRemoved); err != nil {

@@ -64,8 +64,10 @@ func validateDeterministicContext(request httpapi.GenerateRequest, payload agent
 		if _, requested := selected[httpapi.AssetTypeFixedIncome]; !requested {
 			return errors.New("deterministic context contains an unrequested fixed-income asset")
 		}
-		if strings.TrimSpace(rate.Ticker) == "" || strings.TrimSpace(rate.NetRate) == "" {
-			return errors.New("fixed-income context requires ticker and netRate")
+		if strings.TrimSpace(rate.Ticker) == "" || rate.Basis != "REFERENCE_INDEX" ||
+			strings.TrimSpace(rate.Source) == "" || strings.TrimSpace(rate.GrossRate) == "" ||
+			strings.TrimSpace(rate.NetRate) == "" {
+			return errors.New("fixed-income context requires a labeled reference index with grossRate and netRate")
 		}
 		if _, duplicate := tickers[rate.Ticker]; duplicate {
 			return fmt.Errorf("deterministic context contains duplicate ticker %q", rate.Ticker)
@@ -93,6 +95,36 @@ func validateDeterministicContext(request httpapi.GenerateRequest, payload agent
 	if !available {
 		return ErrNoMarketData
 	}
+	if len(payload.RankedAssets) == 0 {
+		return errors.New("deterministic context requires a Go-calculated ranking")
+	}
+	for index, asset := range payload.RankedAssets {
+		if asset.Rank != index+1 {
+			return errors.New("Go-calculated ranking must have contiguous ranks starting at 1")
+		}
+		expectedType, exists := tickerType(payload.DeterministicContext, asset.Ticker)
+		if !exists || expectedType != asset.Type {
+			return fmt.Errorf("Go-calculated ranking contains an asset outside the deterministic context: %q", asset.Ticker)
+		}
+		if _, requested := selected[httpapi.AssetType(asset.Type)]; !requested {
+			return fmt.Errorf("Go-calculated ranking contains unrequested asset type %q", asset.Type)
+		}
+		if strings.TrimSpace(asset.Score) == "" || strings.TrimSpace(asset.ScoreMetric) == "" {
+			return fmt.Errorf("Go-calculated ranking requires score and scoreMetric for %q", asset.Ticker)
+		}
+		expectedMetric := map[string]string{
+			string(httpapi.AssetTypeFixedIncome): "REFERENCE_INDEX_NET_RATE",
+			string(httpapi.AssetTypeStock):       "EARNINGS_YIELD",
+			string(httpapi.AssetTypeFII):         "DIVIDEND_YIELD_TTM",
+		}[asset.Type]
+		if asset.ScoreMetric != expectedMetric {
+			return fmt.Errorf("Go-calculated scoreMetric does not match asset type for %q", asset.Ticker)
+		}
+		score, err := parseDecimal(asset.Score)
+		if err != nil || score.Sign() < 0 {
+			return fmt.Errorf("Go-calculated ranking has an invalid score for %q", asset.Ticker)
+		}
+	}
 	return nil
 }
 
@@ -100,33 +132,13 @@ func validateAgentResponse(request httpapi.GenerateRequest, payload agentclient.
 	if response.Status != "COMPLETED" || response.JustificationText == "" {
 		return errors.New("agent response must be COMPLETED and include a justification")
 	}
-	allowed := make(map[string]string)
-	for _, rate := range payload.DeterministicContext.FixedIncomeRates {
-		allowed[rate.Ticker] = string(httpapi.AssetTypeFixedIncome)
+	if len(response.RankedAssets) != len(payload.RankedAssets) {
+		return errors.New("agent response changed the Go-calculated ranking")
 	}
-	for _, asset := range payload.DeterministicContext.StocksAndFiis {
-		allowed[asset.Ticker] = asset.Type
-	}
-	requested := make(map[string]struct{}, len(request.AssetTypes))
-	for _, assetType := range request.AssetTypes {
-		requested[string(assetType)] = struct{}{}
-	}
-	ranked := make(map[string]struct{}, len(response.RankedAssets))
-	for index, asset := range response.RankedAssets {
-		if asset.Rank != index+1 {
-			return fmt.Errorf("agent ranking must use contiguous ranks starting at 1; position %d has rank %d", index+1, asset.Rank)
+	for index, ranked := range response.RankedAssets {
+		if ranked != payload.RankedAssets[index] {
+			return errors.New("agent response changed the Go-calculated ranking")
 		}
-		expectedType, exists := allowed[asset.Ticker]
-		if !exists || expectedType != asset.Type {
-			return fmt.Errorf("agent ranked asset %q with type %q outside the deterministic context", asset.Ticker, asset.Type)
-		}
-		if _, exists := requested[asset.Type]; !exists {
-			return fmt.Errorf("agent ranked unrequested asset type %q", asset.Type)
-		}
-		if _, duplicate := ranked[asset.Ticker]; duplicate {
-			return fmt.Errorf("agent ranking contains duplicate ticker %q", asset.Ticker)
-		}
-		ranked[asset.Ticker] = struct{}{}
 	}
 	cited := make(map[string]struct{}, len(response.CitedNewsIDs))
 	for _, id := range response.CitedNewsIDs {
@@ -139,4 +151,18 @@ func validateAgentResponse(request httpapi.GenerateRequest, payload agentclient.
 		cited[id] = struct{}{}
 	}
 	return nil
+}
+
+func tickerType(context agentclient.DeterministicContext, ticker string) (string, bool) {
+	for _, rate := range context.FixedIncomeRates {
+		if rate.Ticker == ticker {
+			return string(httpapi.AssetTypeFixedIncome), true
+		}
+	}
+	for _, asset := range context.StocksAndFiis {
+		if asset.Ticker == ticker {
+			return asset.Type, true
+		}
+	}
+	return "", false
 }

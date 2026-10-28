@@ -70,6 +70,26 @@ O backend Go está em implementação. Consulte
 
 ## Configuração
 
-Não inclua credenciais ou arquivos `.env` no repositório. A configuração de
-ambiente e os comandos completos de execução local serão documentados conforme
-os serviços e a infraestrutura forem implementados.
+Use um único `.env` local na raiz do monorepo para configurar Compose, API Go,
+worker de mercado e agente Python:
+
+```sh
+cp .env.example .env
+# Edite .env e informe suas chaves e modelos do OpenRouter.
+```
+
+O `.env` é ignorado pelo Git e não deve ser compartilhado. O Compose lê esse
+arquivo automaticamente; os processos Go e Python também o carregam ao iniciar.
+Variáveis já definidas no ambiente do processo têm precedência. Os valores de
+credenciais no `.env.example` são apenas exemplos locais; substitua-os antes de
+usar provedores externos.
+
+Com as dependências locais disponíveis, os processos podem ser iniciados em
+terminais separados a partir da raiz:
+
+```sh
+docker compose up -d postgres qdrant
+go -C backend run .
+go -C backend run ./cmd/market-worker
+uv --directory agent run --locked uvicorn fin_agent.api:app --host 0.0.0.0 --port 8000
+```

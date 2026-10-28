@@ -1,7 +1,27 @@
+from pathlib import Path
+
 import pytest
 
 from fin_agent.config import Settings
 from fin_agent.providers import ConfigurationError
+
+
+def test_settings_load_root_dotenv_without_overriding_process_environment(tmp_path, monkeypatch):
+    root = tmp_path
+    nested = root / "agent" / "src"
+    nested.mkdir(parents=True)
+    (root / ".env").write_text(
+        "GEMINI_API_KEY=from-file\nOPENROUTER_TIMEOUT_SECONDS=10\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(nested)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_TIMEOUT_SECONDS", "15")
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_api_key == "from-file"
+    assert settings.openrouter_timeout == 15
 
 
 def test_settings_choose_768_dimensional_gemini_embeddings_and_order_routes():

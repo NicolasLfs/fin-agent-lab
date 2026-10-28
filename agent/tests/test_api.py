@@ -11,9 +11,33 @@ def valid_request() -> dict:
     return {
         "reportId": str(uuid4()),
         "deterministicContext": {
-            "fixedIncomeRates": [{"ticker": "TESOURO_IPCA_2029", "netRate": "0.0650"}],
+            "fixedIncomeRates": [
+                {
+                    "ticker": "SELIC_SGS_432",
+                    "basis": "REFERENCE_INDEX",
+                    "source": "BCB_SGS:432",
+                    "grossRate": "0.0650",
+                    "netRate": "0.0558",
+                }
+            ],
             "stocksAndFiis": [{"ticker": "VALE3", "type": "STOCK", "referencePrice": "68.50"}],
         },
+        "rankedAssets": [
+            {
+                "rank": 1,
+                "ticker": "VALE3",
+                "type": "STOCK",
+                "score": "0.1000",
+                "scoreMetric": "EARNINGS_YIELD",
+            },
+            {
+                "rank": 2,
+                "ticker": "SELIC_SGS_432",
+                "type": "FIXED_INCOME",
+                "score": "0.0558",
+                "scoreMetric": "REFERENCE_INDEX_NET_RATE",
+            },
+        ],
         "assetTypes": ["FIXED_INCOME", "STOCK"],
     }
 
@@ -22,8 +46,20 @@ def test_run_returns_contract_response():
     expected = RunResponse(
         status="COMPLETED",
         rankedAssets=[
-            {"rank": 1, "ticker": "TESOURO_IPCA_2029", "type": "FIXED_INCOME"},
-            {"rank": 2, "ticker": "VALE3", "type": "STOCK"},
+            {
+                "rank": 1,
+                "ticker": "VALE3",
+                "type": "STOCK",
+                "score": "0.1000",
+                "scoreMetric": "EARNINGS_YIELD",
+            },
+            {
+                "rank": 2,
+                "ticker": "SELIC_SGS_432",
+                "type": "FIXED_INCOME",
+                "score": "0.0558",
+                "scoreMetric": "REFERENCE_INDEX_NET_RATE",
+            },
         ],
         justificationText="As notícias recuperadas não indicam bandeiras vermelhas.",
         citedNewsIds=["news-point-1"],

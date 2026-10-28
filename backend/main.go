@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fin-agent/internal/agentclient"
+	envconfig "fin-agent/internal/config"
 	"fin-agent/internal/health"
 	"fin-agent/internal/httpapi"
 	"fin-agent/internal/pgrepository"
@@ -149,6 +150,10 @@ func applicationOptions(config Config) []fx.Option {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+	if err := envconfig.LoadDotEnv(); err != nil {
+		logger.Error("cannot load local environment file", "error", err)
+		os.Exit(1)
+	}
 	config, err := loadConfig()
 	if err != nil {
 		logger.Error("invalid backend configuration", "error", err)

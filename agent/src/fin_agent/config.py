@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlparse
 
+from dotenv import find_dotenv, load_dotenv
+
 from .providers import ConfigurationError
 
 
@@ -25,6 +27,8 @@ class Settings:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
+        if environ is None:
+            load_dotenv(find_dotenv(usecwd=True), override=False)
         values = os.environ if environ is None else environ
         try:
             dimensions = int(values.get("GEMINI_EMBEDDING_DIMENSIONS", "768"))

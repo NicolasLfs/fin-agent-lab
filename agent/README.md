@@ -11,23 +11,24 @@ uv run --locked pytest
 uv build
 ```
 
-Para executar a API, configure as variáveis de ambiente da seção seguinte e
-inicie:
+Para executar a API, crie o `.env` na raiz do repositório a partir de
+`.env.example`, preencha as credenciais e inicie a partir da raiz. O agente
+carrega esse arquivo sem sobrescrever variáveis já existentes no ambiente:
 
 ```sh
-uv run --locked uvicorn fin_agent.api:app --host 0.0.0.0 --port 8080
+uv --directory agent run --locked uvicorn fin_agent.api:app --host 0.0.0.0 --port 8000
 ```
 
 O serviço também pode ser empacotado em container; o Dockerfile instala apenas
 as dependências travadas no lockfile:
 
 ```sh
-docker build -t fin-agent:local .
-docker run --rm --env-file .env -p 8080:8080 fin-agent:local
+docker build -t fin-agent:local agent
+docker run --rm --env-file .env -p 8000:8080 fin-agent:local
 ```
 
-O arquivo `.env` é local e não deve ser versionado. Nunca coloque chaves reais
-em código, logs, testes, fixtures ou documentação.
+O arquivo `.env` é local, ignorado pelo Git e não deve ser versionado. Nunca
+coloque chaves reais em código, logs, testes, fixtures ou documentação.
 
 ## Configuração
 
@@ -56,7 +57,7 @@ uma coleção existente com dimensão vetorial diferente causa erro explícito.
 ## API e fluxo RAG
 
 - `POST /internal/agent/run` recebe o contrato `reportId`,
-  `deterministicContext` e `assetTypes` definido em
+  `deterministicContext`, `rankedAssets` calculado pelo Go e `assetTypes` definido em
   [ARCHITECTURE.md](../ARCHITECTURE.md).
 - `GET /health/live` verifica o processo; `GET /health/ready` verifica
   PostgreSQL, Qdrant e SQS.
@@ -72,11 +73,12 @@ retomar a mesma execução após falhas. Rotas OpenRouter são tentadas na ordem
 configurada; limite, timeout, indisponibilidade e resposta inválida acionam a
 próxima rota. Se todas as rotas responderem com limite, a API retorna `429`.
 
-O LLM recebe os valores financeiros calculados em Go como contexto imutável:
-não calcula nem altera taxas, rentabilidade ou preços. A resposta limita os
-ativos aos tickers do contexto e valida que cada notícia citada corresponde a
-um ID efetivamente retornado pelo Qdrant. Os IDs citados permanecem exatos na
-resposta para auditoria.
+O LLM recebe os valores financeiros e a ordenação calculados em Go como
+contexto imutável: não calcula nem altera taxas, rentabilidade, scores ou
+posições. Ele retorna tickers com sinalização de risco e uma justificativa, e o
+LangGraph repassa `rankedAssets` sem alterações. A resposta valida que cada
+notícia citada corresponde a um ID efetivamente retornado pelo Qdrant. Os IDs
+citados permanecem exatos na resposta para auditoria.
 
 ## Ingestão de notícias
 
@@ -106,6 +108,9 @@ Metadados persistidos:
 Testes de integração opcionais com serviços reais:
 
 ```sh
-TEST_DATABASE_URL="$DATABASE_URL" uv run --locked pytest tests/integration/test_postgres_checkpoint.py
-QDRANT_TEST_URL="http://localhost:6333" uv run --locked pytest tests/integration/test_qdrant.py
+set -a
+. ../.env
+set +a
+uv run --locked pytest tests/integration/test_postgres_checkpoint.py
+uv run --locked pytest tests/integration/test_qdrant.py
 ```

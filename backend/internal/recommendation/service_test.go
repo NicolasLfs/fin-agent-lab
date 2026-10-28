@@ -28,6 +28,9 @@ func TestGenerateValidatesAgentRankingAgainstDeterministicContext(t *testing.T) 
 			DeterministicContext: agentclient.DeterministicContext{
 				StocksAndFiis: []agentclient.StockOrFII{{Ticker: "VALE3", Type: "STOCK", ReferencePrice: "68.50"}},
 			},
+			RankedAssets: []agentclient.RankedAsset{
+				{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+			},
 			AssetTypes: []string{"STOCK"},
 		})
 		if err != nil {
@@ -43,8 +46,10 @@ func TestGenerateValidatesAgentRankingAgainstDeterministicContext(t *testing.T) 
 			t.Errorf("agent request = %#v", request)
 		}
 		return agentclient.RunResponse{
-			Status:            "COMPLETED",
-			RankedAssets:      []agentclient.RankedAsset{{Rank: 1, Ticker: "VALE3", Type: "STOCK"}},
+			Status: "COMPLETED",
+			RankedAssets: []agentclient.RankedAsset{
+				{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+			},
 			JustificationText: "Based on the supplied context.",
 			CitedNewsIDs:      []string{"point-1"},
 		}, nil
@@ -74,6 +79,9 @@ func TestGenerateRejectsAgentInventedAssetAndInvalidRanks(t *testing.T) {
 					DeterministicContext: agentclient.DeterministicContext{
 						StocksAndFiis: []agentclient.StockOrFII{{Ticker: "VALE3", Type: "STOCK", ReferencePrice: "68.50"}},
 					},
+					RankedAssets: []agentclient.RankedAsset{
+						{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+					},
 					AssetTypes: []string{"STOCK"},
 				})
 				return httpapi.GenerateResponse{}, err
@@ -90,6 +98,43 @@ func TestGenerateRejectsAgentInventedAssetAndInvalidRanks(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsAgentChangingGoCalculatedRanking(t *testing.T) {
+	payload := agentclient.RunRequest{
+		ReportID: "report-1",
+		DeterministicContext: agentclient.DeterministicContext{
+			StocksAndFiis: []agentclient.StockOrFII{
+				{Ticker: "VALE3", Type: "STOCK", ReferencePrice: "68.50"},
+				{Ticker: "HGLG11", Type: "FII", ReferencePrice: "150.00"},
+			},
+		},
+		RankedAssets: []agentclient.RankedAsset{
+			{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+			{Rank: 2, Ticker: "HGLG11", Type: "FII", Score: "0.0500", ScoreMetric: "DIVIDEND_YIELD_TTM"},
+		},
+	}
+	repo := repositoryFunc(func(ctx context.Context, _ string, request httpapi.GenerateRequest, invoke func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error)) (httpapi.GenerateResponse, error) {
+		_, err := invoke(ctx, payload)
+		return httpapi.GenerateResponse{}, err
+	})
+	service := New(repo, agentFunc(func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error) {
+		return agentclient.RunResponse{
+			Status: "COMPLETED",
+			RankedAssets: []agentclient.RankedAsset{
+				{Rank: 1, Ticker: "HGLG11", Type: "FII", Score: "0.0500", ScoreMetric: "DIVIDEND_YIELD_TTM"},
+				{Rank: 2, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
+			},
+			JustificationText: "Grounded analysis.",
+		}, nil
+	}))
+
+	_, err := service.Generate(context.Background(), "key-1", httpapi.GenerateRequest{
+		AssetTypes: []httpapi.AssetType{httpapi.AssetTypeStock, httpapi.AssetTypeFII},
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want rejection of changed deterministic ranking")
+	}
+}
+
 func TestGeneratePropagatesAgentFailures(t *testing.T) {
 	wantErr := errors.New("agent transport failed")
 	repo := repositoryFunc(func(ctx context.Context, _ string, _ httpapi.GenerateRequest, invoke func(context.Context, agentclient.RunRequest) (agentclient.RunResponse, error)) (httpapi.GenerateResponse, error) {
@@ -97,6 +142,9 @@ func TestGeneratePropagatesAgentFailures(t *testing.T) {
 			ReportID: "report-1",
 			DeterministicContext: agentclient.DeterministicContext{
 				StocksAndFiis: []agentclient.StockOrFII{{Ticker: "VALE3", Type: "STOCK", ReferencePrice: "68.50"}},
+			},
+			RankedAssets: []agentclient.RankedAsset{
+				{Rank: 1, Ticker: "VALE3", Type: "STOCK", Score: "0.1000", ScoreMetric: "EARNINGS_YIELD"},
 			},
 		})
 		return httpapi.GenerateResponse{}, err
