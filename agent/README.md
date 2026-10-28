@@ -19,16 +19,20 @@ carrega esse arquivo sem sobrescrever variáveis já existentes no ambiente:
 uv --directory agent run --locked uvicorn fin_agent.api:app --host 0.0.0.0 --port 8000
 ```
 
-O serviço também pode ser empacotado em container; o Dockerfile instala apenas
-as dependências travadas no lockfile:
+O serviço é iniciado pelo Compose da raiz, que configura os endereços de rede
+internos para PostgreSQL, Qdrant e LocalStack. Não use `localhost` dentro do
+container para acessar esses serviços:
 
 ```sh
-docker build -t fin-agent:local agent
-docker run --rm --env-file .env -p 8000:8080 fin-agent:local
+bash scripts/local-up.sh
 ```
 
 O arquivo `.env` é local, ignorado pelo Git e não deve ser versionado. Nunca
 coloque chaves reais em código, logs, testes, fixtures ou documentação.
+
+O Dockerfile instala apenas as dependências do `uv.lock`, executa como usuário
+não privilegiado e expõe a porta `8080` internamente. A imagem não recebe
+credenciais durante o build.
 
 ## Configuração
 

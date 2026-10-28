@@ -222,12 +222,24 @@ func TestExecuteIsIdempotentAcrossConcurrentRequestsAndRetries(t *testing.T) {
 	_, err = repository.Execute(ctx, "retry-key", request, func(_ context.Context, payload agentclient.RunRequest) (agentclient.RunResponse, error) {
 		originalReportID = payload.ReportID
 		return agentclient.RunResponse{}, &agentclient.TransportError{
-			Err: errors.New("simulated temporary agent outage"), Retryable: true,
+			Err: context.DeadlineExceeded, Retryable: true,
 		}
 	})
-	var failure *httpapi.Failure
-	if !errors.As(err, &failure) || !failure.Retryable {
-		t.Fatalf("first retryable Execute() error = %v, want retryable API failure", err)
+	if !errors.Is(err, httpapi.ErrProcessing) {
+		t.Fatalf("timeout Execute() error = %v, want pending processing response", err)
+	}
+	var idempotencyStatus, reportStatus string
+	if err := pool.QueryRow(ctx,
+		`SELECT idempotency.status::text, reports.status::text
+		 FROM idempotency_records AS idempotency
+		 JOIN recommendation_reports AS reports ON reports.id = idempotency.report_id
+		 WHERE idempotency.operation = 'recommendations.generate'
+		   AND idempotency.idempotency_key = 'retry-key'`,
+	).Scan(&idempotencyStatus, &reportStatus); err != nil {
+		t.Fatalf("load timeout execution state: %v", err)
+	}
+	if idempotencyStatus != "PROCESSING" || reportStatus != "PROCESSING" {
+		t.Fatalf("timeout state = idempotency %q/report %q, want both PROCESSING", idempotencyStatus, reportStatus)
 	}
 
 	retried, err := repository.Execute(ctx, "retry-key", request, func(_ context.Context, payload agentclient.RunRequest) (agentclient.RunResponse, error) {

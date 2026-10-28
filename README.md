@@ -12,8 +12,9 @@ estão em [CHALLENGE.md](./CHALLENGE.md), as decisões técnicas em
 backend/  API e workers em Go; PostgreSQL/sqlc em backend/db
 agent/    Motor de agentes Python (FastAPI, LangGraph, Gemini e Qdrant)
 infra/
-├── terraform/  Provisionamento local com Terraform (em estruturação)
-└── k8s/        Manifests Kubernetes nativos (em estruturação)
+├── terraform/  Provisionamento do SQS local com Terraform e LocalStack
+└── k8s/        Manifests Kubernetes nativos para Docker Desktop
+scripts/        Inicialização local e validação de infraestrutura
 ```
 
 Cada serviço tem um README com instruções específicas:
@@ -65,31 +66,68 @@ uv sync --locked
 uv build
 ```
 
-O backend Go está em implementação. Consulte
-[backend/README.md](./backend/README.md) para os comandos e detalhes atuais.
+Consulte [backend/README.md](./backend/README.md) para os comandos e detalhes do
+backend Go.
 
-## Configuração
+## Execução local com Docker Compose
 
-Use um único `.env` local na raiz do monorepo para configurar Compose, API Go,
-worker de mercado e agente Python:
+Use um único `.env` local na raiz para configurar PostgreSQL, a API Go, o worker
+de mercado e o agente Python:
 
 ```sh
 cp .env.example .env
-# Edite .env e informe suas chaves e modelos do OpenRouter.
+# Preencha as credenciais e rotas de modelos necessárias.
 ```
 
 O `.env` é ignorado pelo Git e não deve ser compartilhado. O Compose lê esse
-arquivo automaticamente; os processos Go e Python também o carregam ao iniciar.
-Variáveis já definidas no ambiente do processo têm precedência. Os valores de
-credenciais no `.env.example` são apenas exemplos locais; substitua-os antes de
-usar provedores externos.
+arquivo para interpolação; as imagens não contêm credenciais. O agente precisa
+de `GEMINI_API_KEY`, `OPENROUTER_API_KEY` e `OPENROUTER_MODELS` com uma rota
+primária e pelo menos uma contingência. `POSTGRES_PASSWORD` deve corresponder
+à senha inicializada no volume PostgreSQL existente; mudar apenas o `.env` não
+altera a senha gravada no banco.
 
-Com as dependências locais disponíveis, os processos podem ser iniciados em
-terminais separados a partir da raiz:
+Suba o ambiente integrado:
 
 ```sh
-docker compose up -d postgres qdrant
-go -C backend run .
-go -C backend run ./cmd/market-worker
-uv --directory agent run --locked uvicorn fin_agent.api:app --host 0.0.0.0 --port 8000
+bash scripts/local-up.sh
 ```
+
+O script inicia PostgreSQL, Qdrant e LocalStack, executa migrations
+idempotentes, aplica as filas SQS via Terraform, constrói as imagens e aguarda
+a readiness da API. A API fica em `http://localhost:8080`; Qdrant, em
+`http://localhost:6333`; LocalStack, em `http://localhost:4566`. Os volumes
+nomeados preservam PostgreSQL, Qdrant e estado local do LocalStack ao reiniciar.
+Não use `docker compose down -v` se quiser conservar esses dados.
+
+## Kubernetes local
+
+Habilite Kubernetes no Docker Desktop, confirme o contexto `docker-desktop`,
+preencha o `.env` e execute:
+
+```sh
+bash scripts/k8s-up.sh
+```
+
+O script recusa qualquer outro contexto, cria o Secret Kubernetes a partir do
+`.env` sem gravar valores no repositório, provisiona SQS no LocalStack do
+Compose, aplica as migrations e aguarda os Deployments. O cluster reutiliza
+esse LocalStack através de `host.docker.internal`; PostgreSQL e Qdrant do
+Kubernetes usam PVCs próprios. Não há Ingress: para acessar a API:
+
+```sh
+kubectl port-forward -n fin-agent svc/api 8080:8080
+```
+
+Para validar os contratos locais sem aplicar recursos Kubernetes:
+
+```sh
+uv --directory agent run --locked python ../scripts/test_local_infra.py
+docker compose config --quiet
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform validate
+terraform -chdir=infra/terraform test
+```
+
+O teste Terraform cria filas com sufixo isolado e as remove ao concluir; a
+execução normal provisiona apenas `news-processing-queue` e
+`news-processing-dlq`.

@@ -12,6 +12,12 @@
 /backend/coverage.out
 *.test
 
+# Terraform local state and provider cache
+/infra/terraform/.terraform/
+/infra/terraform/terraform.tfstate
+/infra/terraform/terraform.tfstate.backup
+/infra/terraform/*.tfplan
+
 # Local environment and secrets
 .env
 .env.*

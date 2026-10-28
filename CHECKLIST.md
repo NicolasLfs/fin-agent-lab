@@ -102,27 +102,27 @@ Checklist de etapas para implementar o [desafio](./CHALLENGE.md). Marque cada it
 
 ## 7. Testes
 
-- [ ] Testar invariantes de `Money` e rejeição de entradas inválidas.
+- [x] Testar invariantes de `Money` e rejeição de entradas inválidas.
 - [x] Testar cálculo de taxa líquida, métricas e ordenação determinística sem uso de ponto flutuante.
-- [ ] Testar parsing de RSS e deduplicação por SHA-256.
-- [ ] Testar esquemas de entrada, sanitização de texto e filtros de busca do Qdrant.
-- [ ] Testar serialização e validação dos contratos JSON entre Go e FastAPI, o envelope de erro e o mapeamento de status HTTP.
-- [ ] Testar dial timeout de 3 segundos, timeout total configurado entre 30 e 45 segundos e atualização de estado em caso de timeout.
-- [ ] Testar idempotência e concorrência da ingestão e da API de recomendações.
-- [ ] Executar testes de integração com PostgreSQL 18, Qdrant e SQS no LocalStack.
-- [ ] Executar `go test -race ./...`.
-- [ ] Executar `pytest`.
+- [x] Testar parsing de RSS e deduplicação por SHA-256.
+- [x] Testar esquemas de entrada, sanitização de texto e filtros de busca do Qdrant.
+- [x] Testar serialização e validação dos contratos JSON entre Go e FastAPI, o envelope de erro e o mapeamento de status HTTP.
+- [x] Testar dial timeout de 3 segundos, timeout total configurado entre 30 e 45 segundos e atualização de estado em caso de timeout.
+- [x] Testar idempotência e concorrência da ingestão e da API de recomendações.
+- [x] Executar testes de integração com PostgreSQL 18, Qdrant e SQS no LocalStack.
+- [x] Executar `go test -race ./...`.
+- [x] Executar `pytest`.
 
 ## 8. Execução local, infraestrutura e entrega
 
-- [ ] Criar Dockerfiles para os serviços Go e Python.
-- [ ] Criar Docker Compose para serviços da aplicação e dependências locais, incluindo o LocalStack com SQS.
-- [ ] Configurar Terraform em `/infra/terraform` para LocalStack e provisionar os recursos necessários.
-- [ ] Provisionar filas SQS e DLQ pelo Terraform no LocalStack.
-- [ ] Criar manifests Kubernetes nativos em `/infra/k8s` para o ambiente local de aprendizado, sem Helm ou Kustomize.
-- [ ] Configurar Deployments, Services, ConfigMaps, Secrets e probes; adicionar Ingress apenas se necessário para acesso local.
-- [ ] Criar automação para iniciar dependências com Docker, subir LocalStack, executar Terraform e aplicar os manifests no cluster Kubernetes local.
-- [ ] Validar `terraform init && terraform apply` a partir de `/infra/terraform`.
+- [x] Criar Dockerfiles para os serviços Go e Python.
+- [x] Criar Docker Compose para serviços da aplicação e dependências locais, incluindo o LocalStack com SQS.
+- [x] Configurar Terraform em `/infra/terraform` para LocalStack e provisionar os recursos necessários.
+- [x] Provisionar filas SQS e DLQ pelo Terraform no LocalStack.
+- [x] Criar manifests Kubernetes nativos em `/infra/k8s` para o ambiente local de aprendizado, sem Helm ou Kustomize.
+- [x] Configurar Deployments, Services, ConfigMaps, Secrets e probes; adicionar Ingress apenas se necessário para acesso local.
+- [x] Criar automação para iniciar dependências com Docker, subir LocalStack, executar Terraform e aplicar os manifests no cluster Kubernetes local.
+- [x] Validar `terraform init && terraform apply` a partir de `/infra/terraform`.
 - [ ] Validar `kubectl apply -f ./infra/k8s/`.
-- [ ] Documentar arquitetura, decisões de design, configuração e comandos de execução no `README.md` e [ARCHITECTURE.md](./ARCHITECTURE.md).
-- [ ] Confirmar que a solução não inclui gerenciamento de carteiras nem requisitos de autenticação.
+- [x] Documentar arquitetura, decisões de design, configuração e comandos de execução no `README.md` e [ARCHITECTURE.md](./ARCHITECTURE.md).
+- [x] Confirmar que a solução não inclui gerenciamento de carteiras nem requisitos de autenticação.

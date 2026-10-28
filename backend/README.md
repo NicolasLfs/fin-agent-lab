@@ -96,33 +96,23 @@ configure `NEWS_PROCESSING_QUEUE_URL` ou use o valor padrão do LocalStack em
 
 O Compose da raiz executa PostgreSQL 18 e mantém os dados no volume
 `postgres-data`. Ele lê `POSTGRES_PASSWORD` e `POSTGRES_PORT` do `.env` da raiz.
-Suba PostgreSQL e Qdrant a partir da raiz. O Qdrant fica disponível em
-`http://localhost:6333`; ambos os serviços mantêm os dados em volumes nomeados
-para que reinícios dos containers não apaguem relatórios, chaves de idempotência
-ou embeddings:
+Use o inicializador da raiz para iniciar dependências, executar as migrations,
+provisionar SQS e subir os serviços:
 
 ```sh
-docker compose up -d postgres qdrant
-docker compose ps
+bash scripts/local-up.sh
 ```
 
-`POSTGRES_PASSWORD` inicializa a senha apenas quando o volume é criado. Para um
-volume existente, a variável precisa corresponder à senha já configurada no
-PostgreSQL; alterá-la sozinha não troca a senha do usuário.
+O serviço `migrate` registra cada versão na tabela `schema_migrations` dentro
+da mesma transação que aplica o arquivo `.up.sql`, permitindo repetir a
+inicialização sem duplicar alterações. `POSTGRES_PASSWORD` inicializa a senha
+apenas quando o volume é criado. Para um volume existente, ela precisa
+corresponder à senha já configurada no PostgreSQL; alterá-la no `.env` não
+troca a senha do usuário.
 
-Aplique as migrations na ordem numérica, uma única vez:
-
-```sh
-docker compose exec -T postgres psql -U fin_agent -d fin_agent \
-  < backend/db/migrations/000001_persistence_domain.up.sql
-docker compose exec -T postgres psql -U fin_agent -d fin_agent \
-  < backend/db/migrations/000002_deterministic_market_indicators.up.sql
-docker compose exec -T postgres psql -U fin_agent -d fin_agent \
-  < backend/db/migrations/000003_market_data_sync_status.up.sql
-```
-
-Para reverter, aplique os arquivos `.down.sql` em ordem inversa. O Compose não
-apaga o volume ao reiniciar os serviços.
+PostgreSQL e Qdrant ficam em volumes nomeados para preservar relatórios,
+idempotência e embeddings. O Qdrant fica disponível em
+`http://localhost:6333`. Reiniciar serviços não apaga os volumes.
 
 ## Desenvolvimento e testes
 
@@ -148,10 +138,27 @@ go test ./db -run TestPostgres18PersistenceMigration
 O teste cria e remove um schema isolado; não apaga nem altera as tabelas do
 schema padrão do banco configurado.
 
+Com PostgreSQL 18, Qdrant e LocalStack disponíveis, execute as integrações
+com:
+
+```sh
+set -a
+. ../.env
+set +a
+go test -race ./...
+LOCALSTACK_TEST_URL=http://localhost:4566 go test ./internal/ingest \
+  -run TestSQSClientPublishesNewsToLocalStack
+```
+
+O teste SQS cria e remove uma fila isolada e valida o payload publicado. Os
+testes de integração PostgreSQL e Qdrant são habilitados por `TEST_DATABASE_URL`
+e `QDRANT_TEST_URL`, respectivamente; sem essas variáveis, são ignorados.
+
 ## Docker
 
-O Dockerfile usa esta pasta como contexto de build. Construa a imagem a partir
-da raiz do monorepo com:
+O Dockerfile contém os binários da API e do worker de mercado, em estágios de
+build e runtime. O Compose constrói a imagem `fin-agent-backend:local`; para
+construí-la separadamente a partir da raiz:
 
 ```sh
 docker build -f backend/Dockerfile backend

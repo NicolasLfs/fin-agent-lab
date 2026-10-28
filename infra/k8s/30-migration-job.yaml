@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fin-agent-migrations
+  namespace: fin-agent
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: fin-agent-migrations
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: postgres:18
+          command: ["/bin/sh", "/scripts/apply-migrations.sh"]
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: fin_agent
+            - name: PGUSER
+              value: fin_agent
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fin-agent-secrets
+                  key: POSTGRES_PASSWORD
+            - name: MIGRATIONS_DIR
+              value: /migrations
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+            - name: migration-runner
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: fin-agent-migrations
+        - name: migration-runner
+          configMap:
+            name: fin-agent-migrations
+            items:
+              - key: apply-migrations.sh
+                path: apply-migrations.sh

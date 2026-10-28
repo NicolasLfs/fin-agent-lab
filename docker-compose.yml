@@ -24,6 +24,133 @@ services:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
+  migrate:
+    image: postgres:18
+    environment:
+      MIGRATIONS_DIR: /migrations
+      PGDATABASE: fin_agent
+      PGHOST: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}
+      PGUSER: fin_agent
+    volumes:
+      - ./backend/db/migrations:/migrations:ro
+      - ./scripts/apply-migrations.sh:/scripts/apply-migrations.sh:ro
+    command: ["/bin/sh", "/scripts/apply-migrations.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  localstack:
+    image: localstack/localstack:4.3.0
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      PERSISTENCE: "1"
+      SERVICES: sqs
+    ports:
+      - "127.0.0.1:4566:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "awslocal", "sqs", "list-queues", "--region", "us-east-1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    image: fin-agent-agent:local
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_SECRET_ACCESS_KEY: test
+      DATABASE_URL: postgresql://fin_agent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}@postgres:5432/fin_agent?sslmode=disable
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in the environment}
+      GEMINI_EMBEDDING_DIMENSIONS: ${GEMINI_EMBEDDING_DIMENSIONS:-768}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      NEWS_PROCESSING_QUEUE_URL: http://localstack:4566/000000000000/news-processing-queue
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OPENROUTER_API_KEY in the environment}
+      OPENROUTER_MODELS: ${OPENROUTER_MODELS:?Set OPENROUTER_MODELS in the environment}
+      OPENROUTER_TIMEOUT_SECONDS: ${OPENROUTER_TIMEOUT_SECONDS:-25}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_URL: http://qdrant:6333
+      SQS_WAIT_TIME_SECONDS: ${SQS_WAIT_TIME_SECONDS:-20}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: fin-agent-backend:local
+    environment:
+      AGENT_URL: http://agent:8080
+      DATABASE_URL: postgresql://fin_agent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}@postgres:5432/fin_agent?sslmode=disable
+      HTTP_ADDR: :8080
+      LOCALSTACK_URL: http://localstack:4566
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      localstack:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/live >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  market-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: fin-agent-backend:local
+    command: ["/usr/local/bin/market-worker"]
+    environment:
+      BRAPI_API_KEY: ${BRAPI_API_KEY:-}
+      DATABASE_URL: postgresql://fin_agent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}@postgres:5432/fin_agent?sslmode=disable
+      MARKET_DATA_SYNC_INTERVAL: ${MARKET_DATA_SYNC_INTERVAL:-15m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   qdrant-data:
+  localstack-data:

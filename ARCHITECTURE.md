@@ -332,21 +332,38 @@ O estado do grafo deve carregar o contexto financeiro calculado pelo Go, os ativ
 
 As escolhas abaixo ainda não estão determinadas pelos requisitos e devem ser registradas aqui quando forem tomadas:
 
-- Tipo de fila SQS, valores de visibility timeout, política de retries e quantidade máxima de recebimentos antes da DLQ.
-- Recursos AWS simulados que serão provisionados além do SQS.
 - Endpoint/arquivo diário oficial do Tesouro Direto e seu mapeamento de taxa e vencimento por título.
 - Plano Brapi necessário para cobrir todo o catálogo de FIIs e a frequência máxima de coleta que respeite sua cota.
 
 ## Execução local e infraestrutura
 
-- Docker Compose mantém PostgreSQL e Qdrant locais em volumes nomeados
-  (`postgres-data` e `qdrant-data`) para preservar o estado após reinícios dos
-  containers. O endpoint Qdrant local é `http://localhost:6333`.
-- LocalStack simula SQS no ambiente local.
-- Terraform em `/infra/terraform` provisiona os recursos AWS simulados pelo LocalStack, incluindo filas SQS e DLQ.
-- Kubernetes usa manifests nativos mantidos em `/infra/k8s` para API, worker e motor Python, além das dependências aplicáveis. A escolha de manifests diretos prioriza o aprendizado dos recursos básicos do Kubernetes; o ambiente é local e não será promovido entre ambientes nem para produção.
+- O Compose executa PostgreSQL 18, Qdrant, LocalStack/SQS, API Go, worker de
+  mercado e agente Python. Os volumes nomeados `postgres-data`,
+  `qdrant-data` e `localstack-data` preservam os dados locais entre reinícios.
+- O LocalStack usa a imagem `localstack/localstack:4.3.0` com persistência
+  habilitada. Terraform aponta exclusivamente para `http://localhost:4566`;
+  credenciais de teste do provider não são credenciais AWS.
+- Terraform cria `news-processing-queue` e `news-processing-dlq`. A fila
+  principal usa visibility timeout de 60 s, long polling de 20 s e redrive
+  após cinco recebimentos; a DLQ retém mensagens por 14 dias.
+- `scripts/apply-migrations.sh` mantém a tabela `schema_migrations` e aplica
+  cada migration `.up.sql` em transação. O registro da versão acontece na
+  mesma transação para que uma repetição após falha não duplique o schema.
+- `scripts/local-up.sh` inicia dependências, aplica migrations e Terraform,
+  constrói as imagens e verifica readiness. `scripts/k8s-up.sh` primeiro
+  exige o contexto `docker-desktop`, então gera o Secret local, configura o
+  ConfigMap das migrations e verifica os rollouts.
+- Kubernetes usa manifests nativos em `/infra/k8s` para API, worker, agente,
+  PostgreSQL 18 e Qdrant, sem Helm/Kustomize. PostgreSQL e Qdrant usam PVCs.
+  O cluster Docker Desktop compartilha o LocalStack do Compose pelo endereço
+  `host.docker.internal`; não há um segundo SQS nem estado Terraform separado.
+- A escolha de manifests diretos prioriza o aprendizado dos recursos básicos
+  do Kubernetes; o ambiente é local e não será promovido entre ambientes nem
+  para produção.
 - O cluster Kubernetes local é fornecido pelo Docker Desktop; habilite Kubernetes nas configurações do Docker Desktop e use o contexto `docker-desktop` do `kubectl`.
-- Configuração e segredos são fornecidos por ambiente e mecanismos próprios de configuração, nunca embutidos no código.
+- Configuração não sensível usa ConfigMap. O script Kubernetes gera um Secret
+  local a partir do `.env`, sem guardar valores de credenciais em manifests ou
+  na imagem. Não versionar nem divulgar esse Secret.
 - Liveness verifica se o processo está ativo; readiness verifica dependências necessárias para atender tráfego, incluindo PostgreSQL, Qdrant e SQS.
 
 ## Testes e garantias operacionais
